@@ -1,0 +1,8 @@
+*.pyc
+__pycache__
+smart_env
+**/node_modules/
+.env*
+venv
+*-lock.json
+static/admin/img/firma_aut/

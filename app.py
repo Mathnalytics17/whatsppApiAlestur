@@ -6,8 +6,10 @@ from models import db, User, Session, Message, State, SessionContext, PolicyCons
 import config
 from datetime import datetime, timedelta, timezone
 
-# (por ahora no usamos INACTIVITY_MINUTES, se deja para una versión futura)
+# minutos sin mensaje para empezar a avisar
 INACTIVITY_MINUTES = 10
+# minutos extra después del aviso para cerrar + encuesta
+WARNING_EXTRA_MINUTES = 3
 
 app = Flask(__name__)
 app.config.from_object(config)
@@ -114,6 +116,36 @@ def send_policy_documents(session, number):
         whatsappservice.SendMessageWhatsapp(data)
         log_message(session, "out", f"Documento enviado: {doc_id}", message_type="document")
 
+def mark_session_abandoned(session):
+    """Marca la sesión como 'abandonada' en el contexto."""
+    ctx = SessionContext.query.filter_by(
+        session_id=session.id,
+        context_key="abandoned"
+    ).first()
+    now = datetime.now(timezone.utc)
+    if not ctx:
+        ctx = SessionContext(
+            session_id=session.id,
+            context_key="abandoned",
+            context_value="true",
+            updated_at=now
+        )
+        db.session.add(ctx)
+    else:
+        ctx.context_value = "true"
+        ctx.updated_at = now
+    db.session.commit()
+
+def clear_inactivity_warning(session):
+    """Limpia el flag de aviso de inactividad cuando el usuario vuelve a hablar."""
+    ctx = SessionContext.query.filter_by(
+        session_id=session.id,
+        context_key="inactivity_warning_sent"
+    ).first()
+    if ctx:
+        db.session.delete(ctx)
+        db.session.commit()
+
 # ============================================================
 # LÓGICA PRINCIPAL DEL FLUJO
 # ============================================================
@@ -122,7 +154,7 @@ def handle_new_message(text, number):
     now = datetime.now(timezone.utc)
     user = get_or_create_user(number)
 
-    # 1) Buscar sesión activa SIN cerrarla por inactividad (por ahora)
+    # 1) Buscar sesión activa
     session = get_active_session(user)
 
     # 2) Si no hay sesión activa, crear una nueva
@@ -137,6 +169,9 @@ def handle_new_message(text, number):
         )
         db.session.add(session)
         db.session.commit()
+    else:
+        # si había aviso de inactividad, limpiarlo (el usuario volvió)
+        clear_inactivity_warning(session)
 
     # 3) Registrar el mensaje entrante
     log_message(session, "in", text)

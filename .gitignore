@@ -6,3 +6,4 @@ smart_env
 venv
 *-lock.json
 static/admin/img/firma_aut/
+apiWppDev

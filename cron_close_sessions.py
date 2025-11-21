@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 from models import db, Session, SessionContext
 from app import app, send_text, get_or_create_state, mark_session_abandoned
 
-INACTIVITY_MINUTES = 10
-WARNING_EXTRA_MINUTES = 3  # minutos después del aviso para cerrar
+INACTIVITY_MINUTES = 1
+WARNING_EXTRA_MINUTES = 1 # minutos después del aviso para cerrar
 
 with app.app_context():
 

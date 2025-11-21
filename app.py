@@ -223,19 +223,32 @@ def handle_new_message(text, number):
         return
 
     # ================== ACEPTACIÓN ==================
+    # ================== ACEPTACIÓN ==================
     if state_name == "esperando_aceptacion":
-        # si el usuario toca el botón "Acepto" o escribe "acepto"
-        if "acepto" in text_lower:
+
+        # Normalizamos texto
+        t = text_lower.strip()
+
+        # ------------------------------
+        # Caso A: ACEPTÓ correctamente
+        # ------------------------------
+        if t == "acepto":
             save_policy_consent(session, accepted=True)
+
             session.current_state_id = get_or_create_state("aceptado").id
             db.session.commit()
 
-            send_text(session, number, "Perfecto ✅. Un asesor humano se comunicará contigo.")
-            # aquí termina el flujo automático; el humano toma el control
+            send_text(
+                session,
+                number,
+                "Perfecto ✅. Un asesor humano se comunicará contigo."
+            )
             return
 
-        # si el usuario dice "no acepto" o simplemente "no"
-        if "no acepto" in text_lower or text_lower == "no":
+        # ------------------------------
+        # Caso B: NO ACEPTÓ
+        # ------------------------------
+        if t in ["no acepto", "no"]:
             save_policy_consent(session, accepted=False)
 
             session.current_state_id = get_or_create_state("rechazado").id
@@ -249,9 +262,16 @@ def handle_new_message(text, number):
             close_session(session, "no_acepta_politica")
             return
 
-        # cualquier otra cosa → insistir
-        send_text(session, number, "Por favor responde *Acepto* o *No acepto*.")
+        # ------------------------------
+        # Caso C: Cualquier otra cosa
+        # ------------------------------
+        send_text(
+            session,
+            number,
+            "Por favor responde *Acepto* o *No acepto* para continuar."
+        )
         return
+
 
     # ================== PREGUNTA ENCUESTA ==================
     if state_name == "esperando_calificacion":

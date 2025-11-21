@@ -3,7 +3,6 @@ from datetime import datetime, timedelta, timezone
 from models import db, Session, SessionContext
 from app import app, send_text, get_or_create_state, mark_session_abandoned
 
-# Debe coincidir con app.py
 INACTIVITY_MINUTES = 10
 WARNING_EXTRA_MINUTES = 3  # minutos después del aviso para cerrar
 
@@ -16,7 +15,13 @@ with app.app_context():
         if not s.last_message_time:
             continue
 
-        delta = now - s.last_message_time
+        # ---- FIX: convertir last_message_time a timezone-aware ----
+        if s.last_message_time.tzinfo is None:
+            last_time = s.last_message_time.replace(tzinfo=timezone.utc)
+        else:
+            last_time = s.last_message_time
+
+        delta = now - last_time
 
         # ---- 1) Aviso de inactividad ----
         warning_ctx = SessionContext.query.filter_by(
@@ -43,27 +48,22 @@ with app.app_context():
             )
             db.session.add(warning_ctx)
             db.session.commit()
-            # pasamos a la siguiente sesión, todavía no cerramos
             continue
 
         # ---- 2) Cierre por inactividad + encuesta ----
         if delta > timedelta(minutes=INACTIVITY_MINUTES + WARNING_EXTRA_MINUTES):
-            # ya avisamos y todavía sigue activa → cerrar + encuesta
             abandoned_ctx = SessionContext.query.filter_by(
                 session_id=s.id,
                 context_key="abandoned"
             ).first()
 
             if abandoned_ctx:
-                # ya fue procesada antes como abandonada
                 continue
 
             print(f"[TIMEOUT] Cerrando por inactividad sesión {s.id}")
 
-            # marcar como abandonada
             mark_session_abandoned(s)
 
-            # poner estado "esperando_calificacion"
             encuesta_state = get_or_create_state(
                 "esperando_calificacion",
                 "Esperando que el usuario decida si quiere calificar (timeout)"
@@ -71,7 +71,6 @@ with app.app_context():
             s.current_state_id = encuesta_state.id
             db.session.commit()
 
-            # enviar mensaje de cierre + encuesta
             number = s.user.phone_number
             text = (
                 "Hemos cerrado esta conversación por inactividad. "

@@ -104,10 +104,25 @@ def log_message(session, direction, text, message_type="text"):
 
     return msg
 
-def send_text(session, number, text):
+def send_text(session, number, text, update_last_message=True):
     data = util.TextMessage(text, number=number)
     whatsappservice.SendMessageWhatsapp(data)
-    log_message(session, "out", text)
+
+    # Solo actualiza last_message_time si viene del usuario o del humano,
+    # NO en los mensajes automáticos (warning, timeout, encuesta)
+    if update_last_message:
+        log_message(session, "out", text)
+    else:
+        # Log sin modificar last_message_time
+        msg = Message(
+            session_id=session.id,
+            direction="out",
+            message_text=text,
+            message_type="text"
+        )
+        db.session.add(msg)
+        db.session.commit()
+
 
 def send_policy_buttons(session, number):
     data_button = util.ButtonMessage(number=number)

@@ -6,10 +6,9 @@ from models import db, User, Session, Message, State, SessionContext, PolicyCons
 import config
 from datetime import datetime, timedelta, timezone
 
-# minutos sin mensaje para enviar aviso
+# minutos sin mensaje para empezar a avisar
 INACTIVITY_MINUTES = 10
-# minutos extra después del aviso para cerrar la sesión
-WARNING_EXTRA_MINUTES = 3
+WARNING_EXTRA_MINUTES = 3  # minutos extra después del aviso para cerrar + encuesta
 
 app = Flask(__name__)
 app.config.from_object(config)
@@ -18,6 +17,14 @@ db.init_app(app)
 # ============================================================
 # HELPERS
 # ============================================================
+
+def make_aware(dt):
+    """Convierte un datetime naive en aware (UTC)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 def save_policy_consent(session, accepted: bool):
     consent = PolicyConsent(
@@ -55,14 +62,15 @@ def get_active_session(user):
     )
 
 def close_session(session, reason=None):
+    """Cierra una sesión y guarda razón opcional."""
     if not session or not session.is_active:
         return
 
     now = datetime.now(timezone.utc)
+
     session.is_active = False
     session.end_time = now
-    final_state = get_or_create_state("finalizado", "Sesión finalizada")
-    session.current_state_id = final_state.id
+    session.current_state_id = get_or_create_state("finalizado").id
     session.last_message_time = now
 
     if reason:
@@ -72,10 +80,7 @@ def close_session(session, reason=None):
         ).first()
 
         if not ctx:
-            ctx = SessionContext(
-                session_id=session.id,
-                context_key="close_reason"
-            )
+            ctx = SessionContext(session_id=session.id, context_key="close_reason")
             db.session.add(ctx)
 
         ctx.context_value = reason
@@ -85,6 +90,7 @@ def close_session(session, reason=None):
 
 def log_message(session, direction, text, message_type="text"):
     now = datetime.now(timezone.utc)
+
     msg = Message(
         session_id=session.id,
         direction=direction,
@@ -92,8 +98,10 @@ def log_message(session, direction, text, message_type="text"):
         message_type=message_type
     )
     db.session.add(msg)
+
     session.last_message_time = now
     db.session.commit()
+
     return msg
 
 def send_text(session, number, text):
@@ -119,6 +127,7 @@ def send_policy_documents(session, number):
 
 def mark_session_abandoned(session):
     now = datetime.now(timezone.utc)
+
     ctx = SessionContext.query.filter_by(
         session_id=session.id,
         context_key="abandoned"
@@ -139,7 +148,6 @@ def mark_session_abandoned(session):
     db.session.commit()
 
 def clear_inactivity_warning(session):
-    """Elimina el aviso en cuanto el usuario responde."""
     ctx = SessionContext.query.filter_by(
         session_id=session.id,
         context_key="inactivity_warning_sent"
@@ -150,85 +158,88 @@ def clear_inactivity_warning(session):
         db.session.commit()
 
 # ============================================================
-# FLUJO PRINCIPAL
+# LÓGICA DE MENSAJES
 # ============================================================
 
 def handle_new_message(text, number):
     now = datetime.now(timezone.utc)
     user = get_or_create_user(number)
 
-    # sesión activa
     session = get_active_session(user)
 
-    # si no existía sesión → crearla
     if not session:
-        inicio_state = get_or_create_state("inicio", "Sesión recién iniciada")
         session = Session(
             user_id=user.id,
             start_time=now,
             is_active=True,
-            current_state_id=inicio_state.id,
+            current_state_id=get_or_create_state("inicio").id,
             last_message_time=now
         )
         db.session.add(session)
         db.session.commit()
+    else:
+        clear_inactivity_warning(session)
 
-    # Registrar mensaje ANTES de limpiar warning
     log_message(session, "in", text)
 
-    # Usuario respondió → limpiar flag de aviso
-    clear_inactivity_warning(session)
-
-    # Estado actual
     current_state = db.session.get(State, session.current_state_id)
     state_name = current_state.state_name.lower() if current_state else "inicio"
     text_lower = text.strip().lower()
 
-    # ----------- ESTADOS -----------
+    print(f"🌀 Estado actual: {state_name}")
 
+    # ================== ESTADO INICIO ==================
     if state_name == "inicio":
         send_policy_buttons(session, number)
         send_policy_documents(session, number)
-        waiting = get_or_create_state("esperando_aceptacion")
-        session.current_state_id = waiting.id
+
+        session.current_state_id = get_or_create_state("esperando_aceptacion").id
         db.session.commit()
         return
 
+    # ================== ACEPTACIÓN ==================
     if state_name == "esperando_aceptacion":
         if "acepto" in text_lower:
-            save_policy_consent(session, True)
-            accepted = get_or_create_state("aceptado")
-            session.current_state_id = accepted.id
+            save_policy_consent(session, accepted=True)
+            session.current_state_id = get_or_create_state("aceptado").id
             db.session.commit()
-            send_text(session, number, "Perfecto ✅. Un asesor humano se comunicará contigo en breve.")
+
+            send_text(session, number, "Perfecto ✅. Un asesor humano se comunicará contigo.")
             return
 
-        elif "no acepto" in text_lower or text_lower == "no":
-            save_policy_consent(session, False)
-            rejected = get_or_create_state("rechazado")
-            session.current_state_id = rejected.id
+        if "no acepto" in text_lower or text_lower == "no":
+            save_policy_consent(session, accepted=False)
+
+            session.current_state_id = get_or_create_state("rechazado").id
             db.session.commit()
-            send_text(session, number, "Debes aceptar la política para continuar. Sesión cerrada.")
-            close_session(session, reason="no_acepta_politica")
+
+            send_text(session, number,
+                "Sin aceptar la política no podemos continuar. La sesión será cerrada."
+            )
+            close_session(session, "no_acepta_politica")
             return
 
-        else:
-            send_text(session, number, "Responde *Acepto* o *No acepto*.")
-            return
+        send_text(session, number, "Por favor responde *Acepto* o *No acepto*.")
+        return
 
+    # ================== PREGUNTA ENCUESTA ==================
     if state_name == "esperando_calificacion":
         if text_lower in ["si", "sí", "s", "yes"]:
-            encuesta = get_or_create_state("encuesta_satisfaccion")
-            session.current_state_id = encuesta.id
+            session.current_state_id = get_or_create_state("encuesta_satisfaccion").id
             db.session.commit()
-            send_text(session, number, "¿Quedaste satisfecho? Responde Sí o No.")
+
+            send_text(session, number, "¿Quedaste satisfecho con la atención? (Sí / No)")
             return
 
-        elif text_lower in ["no", "n"]:
+        if text_lower in ["no", "n"]:
             send_text(session, number, "Gracias por tu tiempo 😊")
-            close_session(session, reason="no_quiso_calificar")
+            close_session(session, "no_quiso_calificar")
             return
 
+        send_text(session, number, "Responde *Sí* o *No* por favor.")
+        return
+
+    # ================== ENCUESTA ==================
     if state_name == "encuesta_satisfaccion":
         ctx = SessionContext.query.filter_by(
             session_id=session.id,
@@ -244,18 +255,24 @@ def handle_new_message(text, number):
             ctx.updated_at = now
             db.session.commit()
 
-            send_text(session, number, "Gracias 🙌 ¡Hasta pronto!")
-            close_session(session, reason="encuesta_satisfecho")
+            send_text(session, number, "Gracias por calificar 🙌. ¡Hasta pronto!")
+            close_session(session, "encuesta_satisfecho")
             return
 
-        elif text_lower in ["no", "n"]:
+        if text_lower in ["no", "n"]:
             ctx.context_value = "no_satisfecho"
             ctx.updated_at = now
             db.session.commit()
 
-            send_text(session, number, "Gracias, mejoraremos 💪")
-            close_session(session, reason="encuesta_no_satisfecho")
+            send_text(session, number, "Gracias por tu sinceridad 🙏")
+            close_session(session, "encuesta_no_satisfecho")
             return
+
+        send_text(session, number, "Responde *Sí* o *No* por favor.")
+        return
+
+    # ================== ASESOR HUMANO ==================
+    return
 
 # ============================================================
 # ENDPOINTS
@@ -263,34 +280,72 @@ def handle_new_message(text, number):
 
 @app.route('/welcome', methods=['GET'])
 def Index():
-    return "welcome to the jungle"
+    return 'welcome to the jungle'
+
+@app.route('/whatsapp', methods=['GET'])
+def VerifyToken():
+    try:
+        accessToken = "7393374SHDSJ23UD"
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+
+        if token and challenge and token == accessToken:
+            return challenge
+        return "", 400
+    except:
+        return "", 400
 
 @app.route('/whatsapp', methods=['POST'])
 def RecievedMessage():
     try:
         body = request.get_json()
-        message = body['entry'][0]['changes'][0]['value']['messages'][0]
+        entry = body['entry'][0]
+        message = entry['changes'][0]['value']['messages'][0]
+
         number = message['from']
         text = util.GetTextUser(message)
 
         handle_new_message(text, number)
+
+        print("💬 Mensaje recibido:", text)
         return "EVENT_RECEIVED"
 
     except Exception as e:
-        print("❌ Error:", e)
+        print("❌ Error procesando mensaje:", e)
         return "EVENT_RECEIVED"
+
+@app.route('/sessions/<int:session_id>/close', methods=['POST'])
+def close_session_manual(session_id):
+    session = Session.query.get_or_404(session_id)
+
+    if not session.is_active:
+        return jsonify({"message": "La sesión ya está cerrada"}), 400
+
+    number = session.user.phone_number
+
+    session.current_state_id = get_or_create_state("esperando_calificacion").id
+    db.session.commit()
+
+    send_text(session, number,
+        "La conversación ha finalizado. ¿Deseas calificar tu experiencia? (Sí / No)"
+    )
+
+    return jsonify({"message": "Sesión marcada para calificación"}), 200
 
 @app.route('/sessions/active', methods=['GET'])
 def list_active_sessions():
-    active = Session.query.filter_by(is_active=True).all()
-    out = [{
+    sessions = Session.query.filter_by(is_active=True).all()
+    data = [{
         "id": s.id,
         "user_phone": s.user.phone_number,
-        "start_time": s.start_time.isoformat(),
-        "last_message_time": s.last_message_time.isoformat(),
-        "state": s.state.state_name
-    } for s in active]
-    return jsonify(out), 200
+        "start_time": s.start_time.isoformat() if s.start_time else None,
+        "last_message_time": s.last_message_time.isoformat() if s.last_message_time else None,
+        "state": s.state.state_name if s.state else None
+    } for s in sessions]
+
+    return jsonify(data), 200
+
+# ============================================================
 
 if __name__ == "__main__":
     with app.app_context():

@@ -1,18 +1,18 @@
 def GetTextUser(message):
     text = ""
-    typeMessage=message['type']
+    typeMessage = message['type']
     
     if typeMessage == "text":
-        text=(message["text"])["body"]
+        text = (message["text"])["body"]
         
-    elif typeMessage=="interactive":
+    elif typeMessage == "interactive":
         interactiveObject = message['interactive']
-        typeInteractive=interactiveObject['type']
+        typeInteractive = interactiveObject['type']
         
         if typeInteractive == "button_reply":
             text = (interactiveObject['button_reply'])['title']
-        elif typeInteractive== 'list_reply':
-            text= (interactiveObject['list_reply'])['title']
+        elif typeInteractive == 'list_reply':
+            text = (interactiveObject['list_reply'])['title']
         else:
             print('sin mensaje')
 
@@ -22,62 +22,71 @@ def GetTextUser(message):
     return text
 
 
-def TextMessage(text,number):
-    data={ "messaging_product": "whatsapp", 
-              "to": number,
-              "text": { 
-                  "body":text,
-                  }, 
-              "type": "text", 
-              }
+def TextMessage(text, number):
+    data = {
+        "messaging_product": "whatsapp", 
+        "to": number,
+        "text": { 
+            "body": text,
+        }, 
+        "type": "text",
+    }
     return data
 
-def TextDocumentMessage(number,id):
-    
-    data={ 
-              "messaging_product": "whatsapp", 
-              "to": number,
-              "type": "document", 
-              "document": { 
-                  "link":f'https://drive.google.com/uc?export=download&id={id}',
-                  
-                      # 👈 tipo MIME correcto (evita que llegue como .bin)
-                 "caption": "Documento adjunto"  # 👈 texto descriptivo opcional
-                  
-                  }, 
-              
-              }
+
+def TextDocumentMessage(number, filename):
+    """
+    Envía un documento PDF servido desde tu VPS.
+    Ejemplo de URL:
+      https://luismolinatest.com/archivos/politica_tratamiento_datos.pdf
+    """
+    base_url = "https://luismolinatest.com/archivos"
+    link = f"{base_url}/{filename}"
+
+    data = { 
+        "messaging_product": "whatsapp", 
+        "to": number,
+        "type": "document", 
+        "document": { 
+            "link": link,
+            "caption": "Documento adjunto",
+        }, 
+    }
     return data
+
 
 def ButtonMessage(number):
-    
-    data={
-    "messaging_product": "whatsapp",
-    "to": number,
-    "type": "interactive",
-    "interactive": {
-        "type": "button",
-        "body": {
-            "text": "Bienvenido a Alestur. Nos complace poder brindarte asistencia en todo lo que necesites. Antes de continuar, te pedimos que leas nuestra Política de Tratamiento de Datos Personales. Si estás de acuerdo con su contenido, selecciona *“Acepto”*; de lo contrario, selecciona *“No acepto”*"
-        },
-        "action": {
-            "buttons": [
-                {
-                    "type": "reply",
-                    "reply": {
-                        "id": "001",
-                        "title": "Acepto"
+    data = {
+        "messaging_product": "whatsapp",
+        "to": number,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": (
+                    "Bienvenido a Alestur. Nos complace poder brindarte asistencia en todo lo que necesites. "
+                    "Antes de continuar, te pedimos que leas nuestra Política de Tratamiento de Datos Personales. "
+                    "Si estás de acuerdo con su contenido, selecciona *“Acepto”*; de lo contrario, selecciona *“No acepto”*"
+                )
+            },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "001",
+                            "title": "Acepto"
+                        }
+                    },
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "002",
+                            "title": "No acepto"
+                        }
                     }
-                },
-                {
-                    "type": "reply",
-                    "reply": {
-                        "id": "002",
-                        "title": "No acepto"
-                    }
-                }
-            ]
+                ]
+            }
         }
     }
-}
     return data

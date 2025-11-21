@@ -123,7 +123,6 @@ def send_text(session, number, text, update_last_message=True):
         db.session.add(msg)
         db.session.commit()
 
-
 def send_policy_buttons(session, number):
     data_button = util.ButtonMessage(number=number)
     whatsappservice.SendMessageWhatsapp(data_button)
@@ -131,14 +130,20 @@ def send_policy_buttons(session, number):
     log_message(session, "out", body_text, message_type="interactive")
 
 def send_policy_documents(session, number):
-    ids = [
-        "1tZYPCZgQ6KTqKS-YUBu_yw50uT5KhcGr",
-        "1BOFQmRfLeCW2BkQn2U1QG5m4WTrke2m4",
+    """
+    Envía los PDFs que tienes en tu VPS bajo /archivos
+    Ejemplo de rutas:
+      https://luismolinatest.com/archivos/politica_tratamiento_datos.pdf
+      https://luismolinatest.com/archivos/autorizacion_tratamiento_datos.pdf
+    """
+    filenames = [
+        "politica_tratamiento_datos.pdf",
+        "autorizacion_tratamiento_datos.pdf",
     ]
-    for doc_id in ids:
-        data = util.TextDocumentMessage(number, doc_id)
+    for filename in filenames:
+        data = util.TextDocumentMessage(number, filename)
         whatsappservice.SendMessageWhatsapp(data)
-        log_message(session, "out", f"Documento enviado: {doc_id}", message_type="document")
+        log_message(session, "out", f"Documento enviado: {filename}", message_type="document")
 
 def mark_session_abandoned(session):
     now = datetime.now(timezone.utc)
@@ -193,8 +198,10 @@ def handle_new_message(text, number):
         db.session.add(session)
         db.session.commit()
     else:
+        # si había warning de inactividad, se limpia porque el usuario volvió
         clear_inactivity_warning(session)
 
+    # mensaje entrante del usuario
     log_message(session, "in", text)
 
     current_state = db.session.get(State, session.current_state_id)
@@ -205,6 +212,9 @@ def handle_new_message(text, number):
 
     # ================== ESTADO INICIO ==================
     if state_name == "inicio":
+        # Siempre que entra por primera vez:
+        #  1) botones Acepto / No acepto
+        #  2) PDFs de política y autorización
         send_policy_buttons(session, number)
         send_policy_documents(session, number)
 
@@ -214,26 +224,32 @@ def handle_new_message(text, number):
 
     # ================== ACEPTACIÓN ==================
     if state_name == "esperando_aceptacion":
+        # si el usuario toca el botón "Acepto" o escribe "acepto"
         if "acepto" in text_lower:
             save_policy_consent(session, accepted=True)
             session.current_state_id = get_or_create_state("aceptado").id
             db.session.commit()
 
             send_text(session, number, "Perfecto ✅. Un asesor humano se comunicará contigo.")
+            # aquí termina el flujo automático; el humano toma el control
             return
 
+        # si el usuario dice "no acepto" o simplemente "no"
         if "no acepto" in text_lower or text_lower == "no":
             save_policy_consent(session, accepted=False)
 
             session.current_state_id = get_or_create_state("rechazado").id
             db.session.commit()
 
-            send_text(session, number,
+            send_text(
+                session,
+                number,
                 "Sin aceptar la política no podemos continuar. La sesión será cerrada."
             )
             close_session(session, "no_acepta_politica")
             return
 
+        # cualquier otra cosa → insistir
         send_text(session, number, "Por favor responde *Acepto* o *No acepto*.")
         return
 
@@ -287,6 +303,7 @@ def handle_new_message(text, number):
         return
 
     # ================== ASESOR HUMANO ==================
+    # Estado "aceptado" u otros donde ya habla el humano → solo registramos
     return
 
 # ============================================================
@@ -341,7 +358,9 @@ def close_session_manual(session_id):
     session.current_state_id = get_or_create_state("esperando_calificacion").id
     db.session.commit()
 
-    send_text(session, number,
+    send_text(
+        session,
+        number,
         "La conversación ha finalizado. ¿Deseas calificar tu experiencia? (Sí / No)"
     )
 

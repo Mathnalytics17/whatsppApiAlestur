@@ -1,9 +1,9 @@
 import os
 
 # Configuración de conexión a la base de datos PostgreSQL
-DB_USER = "flask_user"          # usuario que creaste en PostgreSQL
+DB_USER = "alestur_user"          # usuario que creaste en PostgreSQL
 DB_PASS = "tu_clave_segura"     # contraseña que le diste (puedes dejarla simple mientras pruebas)
-DB_NAME = "whatsapp_api"        # nombre de la base creada
+DB_NAME = "superpassword"        # nombre de la base creada
 DB_HOST = "localhost"           # servidor local
 DB_PORT = "5432"                # puerto por defecto de PostgreSQL
 

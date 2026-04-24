@@ -4,8 +4,8 @@ import json
 
 def SendMessageWhatsapp(data):
     try:
-        token = "EAAUGZCgGxfcQBP90DbaLZAKZCNIZAPUS4AdMWFZC1AxsKXZC2V8PJ4BEJQ9TZA4Mg0ZC5KmPnXPVKeTx68t6bufIzMCpj2o0ijPx3FSLxZBAMOWg1r6C9YIZCl1kuEMtUSb7W8l7x2QcEeMf1BMGzZBSMLwS2GZA9UTqygiEqO9R7jagHrrWemMZCxcdQNGmGuAZCDQgZDZD"
-        api_url = "https://graph.facebook.com/v22.0/869379529587385/messages"
+        token = "EAAOPn6NZBxg0BRUZAXCYS1ASEsFWFAjfjTiKMg8S8HVdJHPQjhUq6WWF5yVu9TBXw1qkdnFgLZCPTgiQOKu8rxLB8mJ7BIlfGcIgXJiuyCkoazDHGVhme7iiJRzDCygxxvdjAYoJp01mGhH8hjZAATxBPV84OpWoY1GhqVWdEi4yOWdE7nC1C3oPFqsfpAdUhwUczm1Q8uenD5cXJ59NDfYsZCIIKQCx5LiQnvvqljUBBFLbNjxshNZBjlOYTtWIpJVXZCJNnsaUEDFDxJRBeFz"
+        api_url = "https://graph.facebook.com/v25.0/1055049724364109/messages"
         
         headers = {
             "Content-Type": "application/json",

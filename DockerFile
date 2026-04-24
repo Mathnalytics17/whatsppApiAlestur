@@ -4,9 +4,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install gunicorn psycopg2-binary
 
 COPY . .
 
-WORKDIR /app/apiWpAlestur
-
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+CMD ["gunicorn", "--chdir", "/app", "--bind", "0.0.0.0:8000", "app:app"]

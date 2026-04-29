@@ -33,5 +33,17 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /var/www/APIWPALESTUR/archivos:/var/www/APIWPALESTUR/archivos:ro
 
+  cron:
+    build: .
+    container_name: flask_cron
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - web
+    command: >
+      sh -c "while true; do python cron_close_sessions.py; sleep 60; done"
+
 volumes:
   postgres_data:

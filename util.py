@@ -40,7 +40,7 @@ def TextDocumentMessage(number, filename):
     Ejemplo de URL:
       https://luismolinatest.com/archivos/politica_tratamiento_datos.pdf
     """
-    base_url = "https://luismolinatest.com/archivos"
+    base_url = "https://alesturslimitadaapi.top/archivos"
     link = f"{base_url}/{filename}"
 
     data = { 

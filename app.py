@@ -137,8 +137,8 @@ def send_policy_documents(session, number):
       https://luismolinatest.com/archivos/autorizacion_tratamiento_datos.pdf
     """
     filenames = [
-        "politica_tratamiento_datos.pdf",
-        "autorizacion_tratamiento_datos.pdf",
+        "politica_datos.pdf",
+        "autorizacion_datos.pdf",
     ]
     for filename in filenames:
         data = util.TextDocumentMessage(number, filename)

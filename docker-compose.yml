@@ -29,7 +29,9 @@ services:
     depends_on:
       - web
     volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/APIWPALESTUR/archivos:/var/www/APIWPALESTUR/archivos:ro
+
 volumes:
   postgres_data:

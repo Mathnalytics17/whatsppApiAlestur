@@ -366,7 +366,7 @@ def RecievedMessage():
         print("❌ Error procesando mensaje:", e)
         return "EVENT_RECEIVED"
     
-    
+
 @app.route('/wppconnect', methods=['POST'])
 def WppconnectWebhook():
     """
@@ -377,6 +377,36 @@ def WppconnectWebhook():
     try:
         body = request.get_json() or {}
         print("📥 Webhook WPPConnect recibido:", body)
+
+        # =====================================================
+        # FILTRO ANTI-BUCLE WPPCONNECT
+        # =====================================================
+
+        event = body.get("event")
+
+        # Solo procesamos mensajes reales.
+        # Ignoramos onack, status-find, qrReadSuccess, browserClose, etc.
+        if event and event not in ["onmessage", "onMessage", "message"]:
+            print(f"⏭️ Evento ignorado de WPPConnect: {event}")
+            return jsonify({"status": "ignored_event"}), 200
+
+        # Ignorar ACKs/mensajes enviados por nosotros mismos
+        msg_id = body.get("id") or {}
+        if isinstance(msg_id, dict) and msg_id.get("fromMe") is True:
+            print("⏭️ Mensaje propio/ACK ignorado")
+            return jsonify({"status": "ignored_from_me"}), 200
+
+        if body.get("fromMe") is True:
+            print("⏭️ Mensaje propio ignorado")
+            return jsonify({"status": "ignored_from_me"}), 200
+
+        data = body.get("data") or body.get("message") or {}
+
+        if isinstance(data, dict) and data.get("fromMe") is True:
+            print("⏭️ Mensaje propio ignorado desde data")
+            return jsonify({"status": "ignored_from_me"}), 200
+
+        # =====================================================
 
         extracted = extract_wppconnect_message(body)
 

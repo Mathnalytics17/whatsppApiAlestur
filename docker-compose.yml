@@ -47,15 +47,16 @@ services:
 
 
   wppconnect:
-    image: wppconnect/server-cli:latest
+    build:
+      context: ./wppconnect-server
     container_name: wppconnect
     restart: always
     ports:
       - "21465:21465"
     volumes:
-      - wppconnect_tokens:/usr/src/wpp-server/tokens
-    environment:
-      - SECRET_KEY=CAMBIA_ESTA_CLAVE_SUPER_SEGURA
+      - wppconnect_tokens:/usr/src/wppconnect-server/tokens
+      - wppconnect_user_data:/usr/src/wppconnect-server/userDataDir
 volumes:
   postgres_data:
   wppconnect_tokens:
+  wppconnect_user_data:

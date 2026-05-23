@@ -365,6 +365,114 @@ def RecievedMessage():
     except Exception as e:
         print("❌ Error procesando mensaje:", e)
         return "EVENT_RECEIVED"
+    
+    
+@app.route('/wppconnect', methods=['POST'])
+def WppconnectWebhook():
+    """
+    Webhook para mensajes entrantes desde WPPConnect Server.
+    Este endpoint reemplaza la entrada de Meta Cloud API.
+    """
+
+    try:
+        body = request.get_json() or {}
+        print("📥 Webhook WPPConnect recibido:", body)
+
+        extracted = extract_wppconnect_message(body)
+
+        if not extracted:
+            return jsonify({"status": "ignored"}), 200
+
+        text = extracted["text"]
+        number = extracted["number"]
+
+        if not text or not number:
+            return jsonify({"status": "ignored_empty"}), 200
+
+        print(f"💬 WPPConnect mensaje recibido de {number}: {text}")
+
+        handle_new_message(text, number)
+
+        return jsonify({"status": "ok"}), 200
+
+    except Exception as e:
+        print("❌ Error procesando webhook WPPConnect:", e)
+        return jsonify({"status": "error"}), 200
+
+
+def extract_wppconnect_message(body):
+    """
+    Intenta leer diferentes formatos comunes de webhook de WPPConnect.
+    Lo hacemos flexible porque según versión/config puede cambiar un poco.
+    """
+
+    data = body.get("data") or body.get("message") or body
+
+    # Si data viene como lista, toma el primer mensaje
+    if isinstance(data, list):
+        if not data:
+            return None
+        data = data[0]
+
+    if not isinstance(data, dict):
+        return None
+
+    # Ignorar mensajes enviados por nosotros mismos
+    if data.get("fromMe") is True:
+        return None
+
+    # Ignorar grupos por ahora
+    if data.get("isGroupMsg") is True:
+        return None
+
+    # Número del cliente
+    number = (
+        data.get("from")
+        or data.get("chatId")
+        or data.get("sender", {}).get("id")
+        or data.get("author")
+    )
+
+    # Texto del mensaje
+    text = (
+        data.get("body")
+        or data.get("text")
+        or data.get("content")
+        or data.get("message")
+        or ""
+    )
+
+    # Algunos payloads traen el contenido anidado
+    if isinstance(text, dict):
+        text = (
+            text.get("body")
+            or text.get("conversation")
+            or text.get("text")
+            or ""
+        )
+
+    if not number:
+        return None
+
+    number = normalize_wpp_number(number)
+
+    return {
+        "number": number,
+        "text": str(text).strip()
+    }
+
+
+def normalize_wpp_number(number):
+    number = str(number)
+    number = number.replace("@c.us", "")
+    number = number.replace("@s.whatsapp.net", "")
+    number = number.replace("+", "")
+
+    # Si viene algo raro tipo "57300...@lid", limpiamos lo básico
+    if "@" in number:
+        number = number.split("@")[0]
+
+    return number
 
 @app.route('/sessions/<int:session_id>/close', methods=['POST'])
 def close_session_manual(session_id):

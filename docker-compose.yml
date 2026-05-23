@@ -45,5 +45,17 @@ services:
     command: >
       sh -c "while true; do python cron_close_sessions.py; sleep 60; done"
 
+
+  wppconnect:
+    image: wppconnect/server-cli:latest
+    container_name: wppconnect
+    restart: always
+    ports:
+      - "21465:21465"
+    volumes:
+      - wppconnect_tokens:/usr/src/wpp-server/tokens
+    environment:
+      - SECRET_KEY=CAMBIA_ESTA_CLAVE_SUPER_SEGURA
 volumes:
   postgres_data:
+  wppconnect_tokens:

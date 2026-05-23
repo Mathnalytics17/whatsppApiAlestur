@@ -113,16 +113,11 @@ def SendMessageWhatsapp(data):
 
 def clean_phone(number):
     """
-    Convierte:
-        573001112233@c.us
-    en:
-        573001112233
+    WPPConnect puede recibir números normales o JIDs completos.
+    Si viene @lid o @c.us, lo dejamos intacto.
     """
     if not number:
         return number
 
-    number = str(number)
-    number = number.replace("@c.us", "")
-    number = number.replace("@s.whatsapp.net", "")
-    number = number.replace("+", "")
+    number = str(number).replace("+", "").strip()
     return number

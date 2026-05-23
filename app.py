@@ -493,15 +493,14 @@ def extract_wppconnect_message(body):
 
 
 def normalize_wpp_number(number):
-    number = str(number)
-    number = number.replace("@c.us", "")
-    number = number.replace("@s.whatsapp.net", "")
-    number = number.replace("+", "")
+    """
+    Para WPPConnect NO quitamos @lid ni @c.us.
+    Ese identificador completo es necesario para responder.
+    """
+    if not number:
+        return number
 
-    # Si viene algo raro tipo "57300...@lid", limpiamos lo básico
-    if "@" in number:
-        number = number.split("@")[0]
-
+    number = str(number).replace("+", "").strip()
     return number
 
 @app.route('/sessions/<int:session_id>/close', methods=['POST'])

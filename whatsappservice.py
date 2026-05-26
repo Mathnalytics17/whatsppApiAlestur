@@ -41,11 +41,8 @@ def SendMessageWhatsapp(data):
         if message_type == "text":
             text = data.get("text", {}).get("body") or data.get("message") or ""
 
-            payload = {
-                "phone": clean_phone(number),
-                "message": text,
-                "isGroup": False
-            }
+            payload = build_wpp_phone_payload(number)
+            payload["message"] = text
 
             url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
             response = requests.post(url, json=payload, headers=_headers(), timeout=30)
@@ -70,11 +67,8 @@ def SendMessageWhatsapp(data):
             if options:
                 text += "\n\nResponde con una de estas opciones:\n" + "\n".join(options)
 
-            payload = {
-                "phone": clean_phone(number),
-                "message": text,
-                "isGroup": False
-            }
+            payload = build_wpp_phone_payload(number)
+            payload["message"] = text
 
             url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
             response = requests.post(url, json=payload, headers=_headers(), timeout=30)
@@ -91,11 +85,8 @@ def SendMessageWhatsapp(data):
 
             text = f"{caption}:\n{link}"
 
-            payload = {
-                "phone": clean_phone(number),
-                "message": text,
-                "isGroup": False
-            }
+            payload = build_wpp_phone_payload(number)
+            payload["message"] = text
 
             url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
             response = requests.post(url, json=payload, headers=_headers(), timeout=30)
@@ -121,3 +112,32 @@ def clean_phone(number):
 
     number = str(number).replace("+", "").strip()
     return number
+
+
+def build_wpp_phone_payload(number):
+    """
+    WPPConnect necesita:
+    - phone sin sufijo
+    - isLid=True si viene como @lid
+    - isGroup=True si viene como @g.us
+    """
+    number = str(number).replace("+", "").strip()
+
+    is_lid = number.endswith("@lid")
+    is_group = number.endswith("@g.us")
+
+    if number.endswith("@lid"):
+        phone = number.replace("@lid", "")
+    elif number.endswith("@c.us"):
+        phone = number.replace("@c.us", "")
+    elif number.endswith("@g.us"):
+        phone = number
+    else:
+        phone = number
+
+    return {
+        "phone": phone,
+        "isGroup": is_group,
+        "isNewsletter": False,
+        "isLid": is_lid,
+    }

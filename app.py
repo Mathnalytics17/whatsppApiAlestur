@@ -8,74 +8,45 @@ from models import db, User, Session, Message, State, SessionContext, PolicyCons
 import config
 from datetime import datetime, timedelta, timezone
 
-# minutos sin mensaje para empezar a avisar
 INACTIVITY_MINUTES = int(os.getenv("INACTIVITY_MINUTES", "10"))
-WARNING_EXTRA_MINUTES = int(os.getenv("WARNING_EXTRA_MINUTES", "3"))  # minutos extra después del aviso para cerrar + encuesta
+WARNING_EXTRA_MINUTES = int(os.getenv("WARNING_EXTRA_MINUTES", "3"))
 IGNORE_SAVED_CONTACTS = os.getenv("IGNORE_SAVED_CONTACTS", "false").lower() == "true"
 
 app = Flask(__name__)
 app.config.from_object(config)
 db.init_app(app)
 
-DEFAULT_STATES = [
-    ("inicio", "Inicio de la conversación"),
-    ("esperando_aceptacion", "Esperando aceptación de política de datos"),
-    ("aceptado", "Política aceptada; puede continuar el asesor humano"),
-    ("rechazado", "Política rechazada"),
-    ("esperando_calificacion", "Esperando si el usuario desea calificar"),
-    ("encuesta_satisfaccion", "Encuesta de satisfacción"),
-    ("finalizado", "Sesión finalizada"),
-]
-
-
-def initialize_database():
-    """Crea tablas y estados base también en producción con Gunicorn."""
-    db.create_all()
-    for name, description in DEFAULT_STATES:
-        state = State.query.filter_by(state_name=name).first()
-        if not state:
-            db.session.add(State(state_name=name, description=description))
-    db.session.commit()
-
-
-with app.app_context():
-    try:
-        initialize_database()
-        print("✅ Base de datos inicializada y estados base listos", flush=True)
-    except Exception as e:
-        print("⚠️ No se pudo inicializar la base de datos al arrancar:", e, flush=True)
 
 # ============================================================
-# HELPERS
+# HELPERS GENERALES
 # ============================================================
 
 def make_aware(dt):
-    """Convierte un datetime naive en aware (UTC)."""
     if dt is None:
         return None
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
-def normalize_user_text(text):
-    text = (text or "").strip().lower()
-    text = re.sub(r"[\s\n\r\t]+", " ", text)
-    text = text.strip(" .,!¡¿?;:\"'`´")
-    return text
+
+def normalize_bot_session(session_name):
+    session_name = (session_name or os.getenv("WPPCONNECT_SESSION", "alestur_ventas")).strip()
+    return session_name or "alestur_ventas"
 
 
 def save_policy_consent(session, accepted: bool):
-    consent = PolicyConsent.query.filter_by(session_id=session.id).first()
-    if not consent:
-        consent = PolicyConsent(user_id=session.user_id, session_id=session.id, accepted=accepted)
-        db.session.add(consent)
-    else:
-        consent.accepted = accepted
+    consent = PolicyConsent(
+        user_id=session.user_id,
+        session_id=session.id,
+        accepted=accepted
+    )
+    db.session.add(consent)
     db.session.commit()
     return consent
 
+
 def get_or_create_state(name, description=None):
-    name = name.lower()
+    name = name.lower().strip()
     state = State.query.filter_by(state_name=name).first()
     if not state:
         state = State(state_name=name, description=description or name)
@@ -83,13 +54,36 @@ def get_or_create_state(name, description=None):
         db.session.commit()
     return state
 
-def get_or_create_user(phone_number):
-    user = User.query.filter_by(phone_number=phone_number).first()
+
+def seed_default_states():
+    states = [
+        ("inicio", "Inicio de la conversación"),
+        ("esperando_aceptacion", "Esperando aceptación de política de datos"),
+        ("aceptado", "Política aceptada; puede continuar el asesor humano"),
+        ("rechazado", "Política rechazada"),
+        ("esperando_calificacion", "Esperando si el usuario desea calificar"),
+        ("encuesta_satisfaccion", "Encuesta de satisfacción"),
+        ("finalizado", "Sesión finalizada"),
+    ]
+    for name, description in states:
+        get_or_create_state(name, description)
+
+
+def get_or_create_user(phone_number, bot_session=None):
+    bot_session = normalize_bot_session(bot_session)
+
+    user = User.query.filter_by(
+        phone_number=phone_number,
+        bot_session=bot_session
+    ).first()
+
     if not user:
-        user = User(phone_number=phone_number)
+        user = User(phone_number=phone_number, bot_session=bot_session)
         db.session.add(user)
         db.session.commit()
+
     return user
+
 
 def get_active_session(user):
     return (
@@ -99,8 +93,8 @@ def get_active_session(user):
         .first()
     )
 
+
 def close_session(session, reason=None):
-    """Cierra una sesión y guarda razón opcional."""
     if not session or not session.is_active:
         return
 
@@ -126,87 +120,94 @@ def close_session(session, reason=None):
 
     db.session.commit()
 
-def log_message(session, direction, text, message_type="text"):
+
+def log_message(session, direction, text, message_type="text", update_last_message=True):
     now = datetime.now(timezone.utc)
 
     msg = Message(
         session_id=session.id,
         direction=direction,
-        message_text=text,
+        message_text=text or "",
         message_type=message_type
     )
     db.session.add(msg)
 
-    session.last_message_time = now
-    db.session.commit()
+    if update_last_message:
+        session.last_message_time = now
 
+    db.session.commit()
     return msg
 
-def send_text(session, number, text, update_last_message=True):
-    data = util.TextMessage(text, number=number)
-    sent_ok = whatsappservice.SendMessageWhatsapp(data)
-    if not sent_ok:
-        print(f"⚠️ No se pudo enviar mensaje a {number}", flush=True)
 
-    # Solo actualiza last_message_time si viene del usuario o del humano,
-    # NO en los mensajes automáticos (warning, timeout, encuesta)
-    if update_last_message:
-        log_message(session, "out", text)
-    else:
-        # Log sin modificar last_message_time
-        msg = Message(
-            session_id=session.id,
-            direction="out",
-            message_text=text,
-            message_type="text"
-        )
-        db.session.add(msg)
-        db.session.commit()
+def send_text(session, number, text, update_last_message=True):
+    bot_session = session.user.bot_session if session and session.user else None
+    data = util.TextMessage(text, number=number)
+    whatsappservice.SendMessageWhatsapp(data, session_name=bot_session)
+
+    log_message(
+        session,
+        "out",
+        text,
+        message_type="text",
+        update_last_message=update_last_message
+    )
+
+
+def send_yes_no_buttons(session, number, text, yes_label="Sí", no_label="No", update_last_message=True):
+    bot_session = session.user.bot_session if session and session.user else None
+    data = util.YesNoButtonMessage(number=number, text=text, yes_label=yes_label, no_label=no_label)
+    sent = whatsappservice.SendMessageWhatsapp(data, session_name=bot_session)
+
+    if not sent:
+        fallback = f"{text}\n\nResponde con una opción:\n- {yes_label}\n- {no_label}"
+        send_text(session, number, fallback, update_last_message=update_last_message)
+        return
+
+    log_message(
+        session,
+        "out",
+        text,
+        message_type="interactive",
+        update_last_message=update_last_message
+    )
+
 
 def send_policy_buttons(session, number):
-    """Envía la política como lista interactiva Acepto / No acepto."""
-    data_button = util.PolicyListMessage(number=number)
-    sent_ok = whatsappservice.SendMessageWhatsapp(data_button)
-    body_text = data_button["list"]["description"]
-    log_message(session, "out", body_text, message_type="list")
-    if not sent_ok:
-        print(f"⚠️ Falló el envío del mensaje de política a {number}", flush=True)
+    bot_session = session.user.bot_session if session and session.user else None
+    data_button = util.PolicyButtonMessage(number=number)
+    sent = whatsappservice.SendMessageWhatsapp(data_button, session_name=bot_session)
 
+    body_text = data_button["interactive"]["body"]["text"]
 
-def send_yes_no_list(session, number, text, yes_id="si", no_id="no", update_last_message=True):
-    """Envía preguntas Sí/No como lista interactiva."""
-    data = util.YesNoListMessage(number=number, body=text, yes_id=yes_id, no_id=no_id)
-    sent_ok = whatsappservice.SendMessageWhatsapp(data)
-    if not sent_ok:
-        print(f"⚠️ Falló el envío de lista Sí/No a {number}", flush=True)
-
-    if update_last_message:
-        log_message(session, "out", text, message_type="list")
-    else:
-        msg = Message(
-            session_id=session.id,
-            direction="out",
-            message_text=text,
-            message_type="list"
+    if not sent:
+        fallback = (
+            body_text
+            + "\n\nResponde con una opción:\n- Acepto\n- No acepto"
         )
-        db.session.add(msg)
-        db.session.commit()
+        send_text(session, number, fallback)
+        return
+
+    log_message(session, "out", body_text, message_type="interactive")
+
 
 def send_policy_documents(session, number):
-    """
-    Envía los PDFs que tienes en tu VPS bajo /archivos
-    Ejemplo de rutas:
-      https://luismolinatest.com/archivos/politica_tratamiento_datos.pdf
-      https://luismolinatest.com/archivos/autorizacion_tratamiento_datos.pdf
-    """
-    filenames_env = os.getenv("POLICY_DOCUMENTS", "politica_datos.pdf,autorizacion_datos.pdf")
-    filenames = [f.strip() for f in filenames_env.split(",") if f.strip()]
+    filenames = [
+        "politica_datos.pdf",
+        "autorizacion_datos.pdf",
+    ]
+
+    bot_session = session.user.bot_session if session and session.user else None
+
     for filename in filenames:
         data = util.TextDocumentMessage(number, filename)
-        sent_ok = whatsappservice.SendMessageWhatsapp(data)
-        log_message(session, "out", f"Documento enviado: {filename}", message_type="document")
-        if not sent_ok:
-            print(f"⚠️ Falló el envío del documento {filename} a {number}", flush=True)
+        whatsappservice.SendMessageWhatsapp(data, session_name=bot_session)
+        log_message(
+            session,
+            "out",
+            f"Documento enviado: {filename}",
+            message_type="document"
+        )
+
 
 def mark_session_abandoned(session):
     now = datetime.now(timezone.utc)
@@ -230,6 +231,7 @@ def mark_session_abandoned(session):
 
     db.session.commit()
 
+
 def clear_inactivity_warning(session):
     ctx = SessionContext.query.filter_by(
         session_id=session.id,
@@ -240,14 +242,41 @@ def clear_inactivity_warning(session):
         db.session.delete(ctx)
         db.session.commit()
 
+
+def normalize_answer(text):
+    text = (text or "").strip().lower()
+    text = text.replace("í", "i")
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def is_yes(text):
+    return normalize_answer(text) in ["si", "s", "yes", "acepto calificar", "calificar"]
+
+
+def is_no(text):
+    return normalize_answer(text) in ["no", "n", "no calificar"]
+
+
+def is_accept(text):
+    t = normalize_answer(text)
+    return t in ["acepto", "aceptar", "si acepto", "de acuerdo", "estoy de acuerdo"]
+
+
+def is_reject(text):
+    t = normalize_answer(text)
+    return t in ["no acepto", "no aceptar", "rechazo", "no"]
+
+
 # ============================================================
 # LÓGICA DE MENSAJES
 # ============================================================
 
-def handle_new_message(text, number):
+def handle_new_message(text, number, bot_session=None):
     now = datetime.now(timezone.utc)
-    user = get_or_create_user(number)
+    bot_session = normalize_bot_session(bot_session)
 
+    user = get_or_create_user(number, bot_session=bot_session)
     session = get_active_session(user)
 
     if not session:
@@ -261,23 +290,19 @@ def handle_new_message(text, number):
         db.session.add(session)
         db.session.commit()
     else:
-        # si había warning de inactividad, se limpia porque el usuario volvió
         clear_inactivity_warning(session)
 
-    # mensaje entrante del usuario
     log_message(session, "in", text)
 
     current_state = db.session.get(State, session.current_state_id)
     state_name = current_state.state_name.lower() if current_state else "inicio"
-    text_lower = normalize_user_text(text)
+    text_lower = normalize_answer(text)
 
-    print(f"🌀 Estado actual: {state_name}")
+    print(f"🌀 Estado actual: {state_name} | sesión WPP: {bot_session} | cliente: {number}", flush=True)
 
     # ================== ESTADO INICIO ==================
+    # Se activa con el primer mensaje que escriba la persona. No depende de "hola".
     if state_name == "inicio":
-        # Siempre que entra por primera vez:
-        #  1) botones Acepto / No acepto
-        #  2) PDFs de política y autorización
         send_policy_buttons(session, number)
         send_policy_documents(session, number)
 
@@ -287,60 +312,55 @@ def handle_new_message(text, number):
 
     # ================== ACEPTACIÓN ==================
     if state_name == "esperando_aceptacion":
-
-        if util.is_accept_response(text_lower):
+        if is_accept(text_lower):
             save_policy_consent(session, accepted=True)
 
             session.current_state_id = get_or_create_state("aceptado").id
             db.session.commit()
 
-            send_text(
-                session,
-                number,
-                "Perfecto ✅. Un asesor humano se comunicará contigo."
-            )
+            send_text(session, number, "Perfecto ✅. Un asesor humano se comunicará contigo.")
             return
 
-        if util.is_reject_response(text_lower):
+        if is_reject(text_lower):
             save_policy_consent(session, accepted=False)
 
             session.current_state_id = get_or_create_state("rechazado").id
             db.session.commit()
 
-            send_text(
-                session,
-                number,
-                "Sin aceptar la política no podemos continuar. La sesión será cerrada."
-            )
+            send_text(session, number, "Sin aceptar la política no podemos continuar. La sesión será cerrada.")
             close_session(session, "no_acepta_politica")
             return
 
-        # Si el usuario escribe cualquier cosa, NO dependemos del texto: reenviamos la lista.
         send_policy_buttons(session, number)
         return
 
-
     # ================== PREGUNTA ENCUESTA ==================
     if state_name == "esperando_calificacion":
-        if util.is_accept_response(text_lower):
+        if is_yes(text_lower):
             session.current_state_id = get_or_create_state("encuesta_satisfaccion").id
             db.session.commit()
 
-            send_yes_no_list(
+            send_yes_no_buttons(
                 session,
                 number,
                 "¿Quedaste satisfecho con la atención?",
-                yes_id="satisfecho",
-                no_id="no_satisfecho"
+                yes_label="Sí",
+                no_label="No"
             )
             return
 
-        if util.is_reject_response(text_lower):
+        if is_no(text_lower):
             send_text(session, number, "Gracias por tu tiempo 😊")
             close_session(session, "no_quiso_calificar")
             return
 
-        send_yes_no_list(session, number, "¿Deseas calificar tu experiencia con nosotros?")
+        send_yes_no_buttons(
+            session,
+            number,
+            "¿Deseas calificar tu experiencia con nosotros?",
+            yes_label="Sí",
+            no_label="No"
+        )
         return
 
     # ================== ENCUESTA ==================
@@ -354,7 +374,7 @@ def handle_new_message(text, number):
             ctx = SessionContext(session_id=session.id, context_key="satisfaccion")
             db.session.add(ctx)
 
-        if util.is_accept_response(text_lower) or text_lower == "satisfecho":
+        if is_yes(text_lower):
             ctx.context_value = "satisfecho"
             ctx.updated_at = now
             db.session.commit()
@@ -363,7 +383,7 @@ def handle_new_message(text, number):
             close_session(session, "encuesta_satisfecho")
             return
 
-        if util.is_reject_response(text_lower) or text_lower == "no_satisfecho":
+        if is_no(text_lower):
             ctx.context_value = "no_satisfecho"
             ctx.updated_at = now
             db.session.commit()
@@ -372,18 +392,19 @@ def handle_new_message(text, number):
             close_session(session, "encuesta_no_satisfecho")
             return
 
-        send_yes_no_list(
+        send_yes_no_buttons(
             session,
             number,
-            "¿Quedaste satisfecho con la atención?",
-            yes_id="satisfecho",
-            no_id="no_satisfecho"
+            "Por favor confirma: ¿quedaste satisfecho con la atención?",
+            yes_label="Sí",
+            no_label="No"
         )
         return
 
     # ================== ASESOR HUMANO ==================
-    # Estado "aceptado" u otros donde ya habla el humano → solo registramos
+    # Estado "aceptado": el bot ya no responde; solo registra mensajes.
     return
+
 
 # ============================================================
 # ENDPOINTS
@@ -393,22 +414,20 @@ def handle_new_message(text, number):
 def Index():
     return 'welcome to the jungle'
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok"}), 200
 
 @app.route('/whatsapp', methods=['GET'])
 def VerifyToken():
     try:
-        accessToken = "7393374SHDSJ23UD"
+        accessToken = os.getenv("META_VERIFY_TOKEN", "7393374SHDSJ23UD")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
 
         if token and challenge and token == accessToken:
             return challenge
         return "", 400
-    except:
+    except Exception:
         return "", 400
+
 
 @app.route('/whatsapp', methods=['POST'])
 def RecievedMessage():
@@ -420,56 +439,43 @@ def RecievedMessage():
         number = message['from']
         text = util.GetTextUser(message)
 
-        handle_new_message(text, number)
+        handle_new_message(text, number, bot_session=os.getenv("WPPCONNECT_SESSION", "alestur_ventas"))
 
-        print("💬 Mensaje recibido:", text)
+        print("💬 Mensaje Meta recibido:", text, flush=True)
         return "EVENT_RECEIVED"
-
     except Exception as e:
-        print("❌ Error procesando mensaje:", e)
+        print("❌ Error procesando mensaje Meta:", e, flush=True)
         return "EVENT_RECEIVED"
-    
+
 
 @app.route('/wppconnect', methods=['POST'])
 def WppconnectWebhook():
-    """
-    Webhook para mensajes entrantes desde WPPConnect Server.
-    Este endpoint reemplaza la entrada de Meta Cloud API.
-    """
-
     try:
         body = request.get_json() or {}
-        print("📥 Webhook WPPConnect recibido:", body)
-
-        # =====================================================
-        # FILTRO ANTI-BUCLE WPPCONNECT
-        # =====================================================
+        print("📥 Webhook WPPConnect recibido:", body, flush=True)
 
         event = body.get("event")
 
         # Solo procesamos mensajes reales.
-        # Ignoramos onack, status-find, qrReadSuccess, browserClose, etc.
         if event and event not in ["onmessage", "onMessage", "message"]:
-            print(f"⏭️ Evento ignorado de WPPConnect: {event}")
+            print(f"⏭️ Evento ignorado de WPPConnect: {event}", flush=True)
             return jsonify({"status": "ignored_event"}), 200
 
         # Ignorar ACKs/mensajes enviados por nosotros mismos
         msg_id = body.get("id") or {}
         if isinstance(msg_id, dict) and msg_id.get("fromMe") is True:
-            print("⏭️ Mensaje propio/ACK ignorado")
+            print("⏭️ Mensaje propio/ACK ignorado", flush=True)
             return jsonify({"status": "ignored_from_me"}), 200
 
         if body.get("fromMe") is True:
-            print("⏭️ Mensaje propio ignorado")
+            print("⏭️ Mensaje propio ignorado", flush=True)
             return jsonify({"status": "ignored_from_me"}), 200
 
         data = body.get("data") or body.get("message") or {}
 
         if isinstance(data, dict) and data.get("fromMe") is True:
-            print("⏭️ Mensaje propio ignorado desde data")
+            print("⏭️ Mensaje propio ignorado desde data", flush=True)
             return jsonify({"status": "ignored_from_me"}), 200
-
-        # =====================================================
 
         extracted = extract_wppconnect_message(body)
 
@@ -478,30 +484,25 @@ def WppconnectWebhook():
 
         text = extracted["text"]
         number = extracted["number"]
+        bot_session = normalize_bot_session(extracted.get("bot_session") or body.get("session"))
 
         if not text or not number:
             return jsonify({"status": "ignored_empty"}), 200
 
-        print(f"💬 WPPConnect mensaje recibido de {number}: {text}")
+        print(f"💬 WPPConnect mensaje recibido de {number} para {bot_session}: {text}", flush=True)
 
-        handle_new_message(text, number)
+        handle_new_message(text, number, bot_session=bot_session)
 
         return jsonify({"status": "ok"}), 200
 
     except Exception as e:
-        print("❌ Error procesando webhook WPPConnect:", e)
+        print("❌ Error procesando webhook WPPConnect:", repr(e), flush=True)
         return jsonify({"status": "error"}), 200
 
 
 def extract_wppconnect_message(body):
-    """
-    Intenta leer diferentes formatos comunes de webhook de WPPConnect.
-    Lo hacemos flexible porque según versión/config puede cambiar un poco.
-    """
-
     data = body.get("data") or body.get("message") or body
 
-    # Si data viene como lista, toma el primer mensaje
     if isinstance(data, list):
         if not data:
             return None
@@ -510,17 +511,17 @@ def extract_wppconnect_message(body):
     if not isinstance(data, dict):
         return None
 
-    # Ignorar mensajes enviados por nosotros mismos
     if data.get("fromMe") is True:
+        return None
+
+    # Ignorar grupos por ahora
+    if data.get("isGroupMsg") is True:
         return None
 
     sender = data.get("sender") or body.get("sender") or {}
 
     if IGNORE_SAVED_CONTACTS and sender.get("isMyContact") is True:
         print("⏭️ Contacto guardado ignorado:", sender.get("formattedName") or data.get("from"), flush=True)
-        return None
-    # Ignorar grupos por ahora
-    if data.get("isGroupMsg") is True:
         return None
 
     # Número del cliente
@@ -531,37 +532,20 @@ def extract_wppconnect_message(body):
         or data.get("author")
     )
 
-    # Texto del mensaje. Si viene de una lista, priorizamos rowId/id para no depender del texto visible.
-    text = data.get("selectedRowId") or data.get("rowId")
+    # Texto del mensaje
+    text = (
+        data.get("body")
+        or data.get("text")
+        or data.get("content")
+        or data.get("message")
+        or ""
+    )
 
-    list_response = data.get("listResponse")
-    if not text and isinstance(list_response, dict):
-        text = (
-            list_response.get("selectedRowId")
-            or list_response.get("rowId")
-            or list_response.get("id")
-            or list_response.get("title")
-        )
-
-    if not text:
-        text = util.GetTextUser(data)
-
-    if not text:
-        text = (
-            data.get("body")
-            or data.get("text")
-            or data.get("content")
-            or data.get("message")
-            or ""
-        )
-
-    # Algunos payloads traen el contenido anidado
     if isinstance(text, dict):
         text = (
             text.get("body")
             or text.get("conversation")
             or text.get("text")
-            or text.get("id")
             or ""
         )
 
@@ -572,20 +556,18 @@ def extract_wppconnect_message(body):
 
     return {
         "number": number,
-        "text": str(text).strip()
+        "text": str(text).strip(),
+        "bot_session": body.get("session") or data.get("session"),
     }
 
 
 def normalize_wpp_number(number):
-    """
-    Para WPPConnect NO quitamos @lid ni @c.us.
-    Ese identificador completo es necesario para responder.
-    """
     if not number:
         return number
 
     number = str(number).replace("+", "").strip()
     return number
+
 
 @app.route('/sessions/<int:session_id>/close', methods=['POST'])
 def close_session_manual(session_id):
@@ -599,19 +581,23 @@ def close_session_manual(session_id):
     session.current_state_id = get_or_create_state("esperando_calificacion").id
     db.session.commit()
 
-    send_yes_no_list(
+    send_yes_no_buttons(
         session,
         number,
-        "La conversación ha finalizado. ¿Deseas calificar tu experiencia?"
+        "La conversación ha finalizado. ¿Deseas calificar tu experiencia?",
+        yes_label="Sí",
+        no_label="No"
     )
 
     return jsonify({"message": "Sesión marcada para calificación"}), 200
+
 
 @app.route('/sessions/active', methods=['GET'])
 def list_active_sessions():
     sessions = Session.query.filter_by(is_active=True).all()
     data = [{
         "id": s.id,
+        "bot_session": s.user.bot_session,
         "user_phone": s.user.phone_number,
         "start_time": s.start_time.isoformat() if s.start_time else None,
         "last_message_time": s.last_message_time.isoformat() if s.last_message_time else None,
@@ -620,9 +606,16 @@ def list_active_sessions():
 
     return jsonify(data), 200
 
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
 # ============================================================
 
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
+        seed_default_states()
     app.run(debug=True)

@@ -2,43 +2,75 @@ import os
 import time
 import requests
 
+
 WPPCONNECT_URL = os.getenv("WPPCONNECT_URL", "http://wppconnect:21465").rstrip("/")
-WPPCONNECT_SESSION = os.getenv("WPPCONNECT_SESSION", "alestur_ventas")
-WPPCONNECT_TOKEN = os.getenv("WPPCONNECT_TOKEN", "").strip().strip("'").strip('"')
+DEFAULT_SESSION = os.getenv("WPPCONNECT_SESSION", "alestur_ventas")
+DEFAULT_TOKEN = os.getenv("WPPCONNECT_TOKEN", "")
 
-# Delay entre envíos para no saturar WhatsApp Web / WPPConnect.
-# En .env puedes poner: WPPCONNECT_SEND_DELAY_SECONDS=2
-WPPCONNECT_SEND_DELAY_SECONDS = float(os.getenv("WPPCONNECT_SEND_DELAY_SECONDS", "1.5"))
+SEND_DELAY_SECONDS = float(os.getenv("WPPCONNECT_SEND_DELAY_SECONDS", "1.2"))
+REQUEST_TIMEOUT_SECONDS = int(os.getenv("WPPCONNECT_REQUEST_TIMEOUT_SECONDS", "30"))
 
 
-def _headers():
+def _env_key_for_session(session_name):
+    """
+    alestur_ventas -> WPPCONNECT_TOKEN_ALESTUR_VENTAS
+    ventas-1       -> WPPCONNECT_TOKEN_VENTAS_1
+    """
+    safe = "".join(ch if ch.isalnum() else "_" for ch in session_name.upper())
+    return f"WPPCONNECT_TOKEN_{safe}"
+
+
+def get_token(session_name=None):
+    session_name = session_name or DEFAULT_SESSION
+    return os.getenv(_env_key_for_session(session_name)) or DEFAULT_TOKEN
+
+
+def _headers(session_name=None):
+    token = get_token(session_name)
+
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "Accept": "application/json",
     }
-    if WPPCONNECT_TOKEN:
-        headers["Authorization"] = f"Bearer {WPPCONNECT_TOKEN}"
+
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
     return headers
+
+
+def _sleep_between_messages():
+    if SEND_DELAY_SECONDS > 0:
+        time.sleep(SEND_DELAY_SECONDS)
 
 
 def build_wpp_phone_payload(number):
     """
     WPPConnect necesita:
-    - phone sin @lid / @c.us
-    - isLid=True cuando el identificador entrante viene como @lid
-    - isGroup=True cuando viene como grupo @g.us
+    - phone sin sufijo para @lid y @c.us
+    - isLid=True si viene como @lid
+    - isGroup=True si viene como @g.us
+
+    OJO: cuando WPPConnect recibe @lid desde el webhook, responder al número real puede fallar
+    o irse al chat incorrecto. Por eso para @lid mandamos phone sin @lid + isLid=True.
     """
     if not number:
-        return {"phone": number, "isGroup": False, "isNewsletter": False, "isLid": False}
+        return {
+            "phone": number,
+            "isGroup": False,
+            "isNewsletter": False,
+            "isLid": False,
+        }
 
     number = str(number).replace("+", "").strip()
+
     is_lid = number.endswith("@lid")
     is_group = number.endswith("@g.us")
 
     if number.endswith("@lid"):
-        phone = number[:-4]
+        phone = number.replace("@lid", "")
     elif number.endswith("@c.us"):
-        phone = number[:-5]
+        phone = number.replace("@c.us", "")
     else:
         phone = number
 
@@ -50,103 +82,37 @@ def build_wpp_phone_payload(number):
     }
 
 
-def _sleep_after_send():
+def _post_wpp(path, payload, session_name=None):
+    session_name = session_name or DEFAULT_SESSION
+    url = f"{WPPCONNECT_URL}/api/{session_name}/{path.lstrip('/')}"
+
+    print("📤 WPPConnect URL:", url, flush=True)
+    print("📤 WPPConnect payload:", payload, flush=True)
+
+    _sleep_between_messages()
+
+    response = requests.post(
+        url,
+        json=payload,
+        headers=_headers(session_name),
+        timeout=REQUEST_TIMEOUT_SECONDS
+    )
+
+    print("📤 WPPConnect response:", response.status_code, response.text, flush=True)
+    return response
+
+
+def SendMessageWhatsapp(data, session_name=None):
     """
-    Pequeña pausa después de cada intento de envío.
-    Esto ayuda a evitar que WhatsApp Web encole/sincronice mal cuando mandamos
-    lista + documento + texto muy seguido.
+    Adaptador compatible con tu código viejo.
+    Convierte el formato estilo Meta a endpoints de WPPConnect.
+
+    session_name permite usar varios números:
+      SendMessageWhatsapp(data, session_name="alestur_ventas")
+      SendMessageWhatsapp(data, session_name="alestur_reservas")
     """
-    if WPPCONNECT_SEND_DELAY_SECONDS > 0:
-        print(
-            f"⏳ Esperando {WPPCONNECT_SEND_DELAY_SECONDS}s antes del siguiente envío...",
-            flush=True,
-        )
-        time.sleep(WPPCONNECT_SEND_DELAY_SECONDS)
-
-
-def _post_wpp(endpoint, payload, label):
-    url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/{endpoint}"
-    print(f"📤 WPPConnect payload {label}:", payload, flush=True)
-
     try:
-        response = requests.post(url, json=payload, headers=_headers(), timeout=30)
-        print(f"📤 WPPConnect {label}:", response.status_code, response.text, flush=True)
-
-        if response.status_code not in (200, 201):
-            return False
-
-        try:
-            body = response.json()
-        except Exception:
-            return True
-
-        # WPPConnect puede responder status success aunque WhatsApp falle internamente.
-        # Si ack=-1 o isSendFailure=true, para nosotros es envío fallido.
-        items = body.get("response")
-        if isinstance(items, dict):
-            items = [items]
-
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict) and (
-                    item.get("isSendFailure") is True or item.get("ack") == -1
-                ):
-                    print(
-                        "❌ WhatsApp marcó el envío como fallido aunque WPPConnect respondió success",
-                        flush=True,
-                    )
-                    return False
-
-        return True
-
-    finally:
-        # El delay se ejecuta tanto si fue exitoso como si falló.
-        # Así evitamos mandar fallback/textos pegados inmediatamente.
-        _sleep_after_send()
-
-
-def _send_text(number, text, label="send-message"):
-    payload = build_wpp_phone_payload(number)
-    payload["message"] = text
-    return _post_wpp("send-message", payload, label)
-
-
-def _build_list_fallback_text(list_obj):
-    description = list_obj.get("description") or "Selecciona una opción"
-    sections = list_obj.get("sections") or []
-
-    fallback_lines = [description, "", "Si no puedes ver la lista, responde con una opción:"]
-
-    idx = 1
-    for section in sections:
-        for row in section.get("rows", []):
-            title = row.get("title", "")
-            if title:
-                fallback_lines.append(f"{idx}. {title}")
-                idx += 1
-
-    return "\n".join(fallback_lines)
-
-
-def _send_list(number, list_obj, label="send-list-message"):
-    payload = build_wpp_phone_payload(number)
-    payload.update({
-        "description": list_obj.get("description") or "Selecciona una opción",
-        "buttonText": list_obj.get("buttonText") or "Responder",
-        "sections": list_obj.get("sections") or [],
-    })
-
-    ok = _post_wpp("send-list-message", payload, label)
-    if ok:
-        return True
-
-    # Fallback: si la lista falla, no rompemos el flujo. Enviamos texto numerado.
-    fallback_text = _build_list_fallback_text(payload)
-    return _send_text(number, fallback_text, f"{label}->fallback-text")
-
-
-def SendMessageWhatsapp(data):
-    try:
+        session_name = session_name or DEFAULT_SESSION
         number = data.get("to") or data.get("phone")
         message_type = data.get("type", "text")
 
@@ -156,48 +122,120 @@ def SendMessageWhatsapp(data):
 
         if message_type == "text":
             text = data.get("text", {}).get("body") or data.get("message") or ""
-            return _send_text(number, text, "send-message")
+
+            payload = build_wpp_phone_payload(number)
+            payload["message"] = text
+
+            response = _post_wpp("send-message", payload, session_name=session_name)
+            return response.status_code in [200, 201]
+
+        if message_type == "interactive":
+            sent = _send_interactive_buttons(data, number, session_name=session_name)
+            if sent:
+                return True
+
+            # Fallback estable a texto normal
+            body = data.get("interactive", {}).get("body", {}).get("text", "")
+            buttons = data.get("interactive", {}).get("action", {}).get("buttons", [])
+
+            options = []
+            for btn in buttons:
+                title = btn.get("reply", {}).get("title")
+                if title:
+                    options.append(f"- {title}")
+
+            text = body
+            if options:
+                text += "\n\nResponde con una de estas opciones:\n" + "\n".join(options)
+
+            payload = build_wpp_phone_payload(number)
+            payload["message"] = text
+
+            response = _post_wpp("send-message", payload, session_name=session_name)
+            return response.status_code in [200, 201]
 
         if message_type == "document":
             doc = data.get("document", {})
             link = doc.get("link")
             caption = doc.get("caption", "Documento adjunto")
+
+            # Estable: texto con link. Evita fallos con send-file por URL.
             text = f"{caption}:\n{link}"
-            return _send_text(number, text, "document->link")
 
-        if message_type == "list":
-            return _send_list(number, data.get("list") or {}, "send-list-message")
+            payload = build_wpp_phone_payload(number)
+            payload["message"] = text
 
-        if message_type == "interactive":
-            # Compatibilidad con tu estructura vieja de Meta: interactive/buttons -> WPPConnect list.
-            body = data.get("interactive", {}).get("body", {}).get("text", "")
-            buttons = data.get("interactive", {}).get("action", {}).get("buttons", [])
-            rows = []
-
-            for btn in buttons:
-                reply = btn.get("reply", {})
-                title = reply.get("title")
-                btn_id = reply.get("id") or title
-
-                if title:
-                    rows.append({
-                        "rowId": str(btn_id),
-                        "title": str(title)[:24],
-                        "description": f"Seleccionar: {title}"[:72],
-                    })
-
-            if rows:
-                return _send_list(number, {
-                    "description": body,
-                    "buttonText": "Seleccionar opción",
-                    "sections": [{"title": "Alestur", "rows": rows}],
-                }, "interactive->list")
-
-            return _send_text(number, body, "interactive->text")
+            response = _post_wpp("send-message", payload, session_name=session_name)
+            return response.status_code in [200, 201]
 
         print("⚠️ Tipo de mensaje no soportado todavía:", message_type, data, flush=True)
         return False
 
     except Exception as exception:
-        print("❌ Error enviando por WPPConnect:", exception, flush=True)
+        print("❌ Error enviando por WPPConnect:", repr(exception), flush=True)
         return False
+
+
+def _send_interactive_buttons(data, number, session_name=None):
+    """
+    Intenta usar botones reales de WPPConnect.
+    La versión exacta puede variar, por eso probamos payloads conocidos y luego fallback.
+    """
+    interactive = data.get("interactive", {})
+    body = interactive.get("body", {}).get("text", "")
+    buttons = interactive.get("action", {}).get("buttons", [])
+
+    button_labels = []
+    for btn in buttons:
+        title = btn.get("reply", {}).get("title")
+        if title:
+            button_labels.append(title)
+
+    if not body or not button_labels:
+        return False
+
+    base = build_wpp_phone_payload(number)
+
+    # Payload 1: común en WPPConnect Server para /send-buttons
+    payloads = [
+        {
+            **base,
+            "message": body,
+            "buttons": button_labels,
+            "title": "",
+            "footer": "",
+        },
+        {
+            **base,
+            "title": "",
+            "description": body,
+            "buttons": button_labels,
+            "footer": "",
+        },
+        {
+            **base,
+            "message": body,
+            "buttonList": [
+                {"id": str(i + 1), "text": label}
+                for i, label in enumerate(button_labels)
+            ],
+            "footer": "",
+        },
+    ]
+
+    for payload in payloads:
+        try:
+            response = _post_wpp("send-buttons", payload, session_name=session_name)
+            if response.status_code in [200, 201]:
+                return True
+        except Exception as e:
+            print("⚠️ send-buttons falló, probando fallback/payload siguiente:", repr(e), flush=True)
+
+    return False
+
+
+def clean_phone(number):
+    if not number:
+        return number
+
+    return str(number).replace("+", "").strip()

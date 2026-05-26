@@ -35,9 +35,7 @@ def TextMessage(text, number):
     return {
         "messaging_product": "whatsapp",
         "to": number,
-        "text": {
-            "body": text,
-        },
+        "text": {"body": text},
         "type": "text",
     }
 
@@ -57,15 +55,18 @@ def TextDocumentMessage(number, filename):
 
 
 def PolicyButtonMessage(number):
+    # Mantengo el nombre viejo para no tocar app.py, pero ahora se envía como LISTA.
     return YesNoButtonMessage(
         number=number,
         text=(
             "Bienvenido a Alestur. Nos complace poder brindarte asistencia en todo lo que necesites. "
             "Antes de continuar, te pedimos que leas nuestra Política de Tratamiento de Datos Personales. "
-            "Si estás de acuerdo con su contenido, selecciona *Acepto*; de lo contrario, selecciona *No acepto*."
+            "Si estás de acuerdo con su contenido, selecciona *“Acepto”*; de lo contrario, selecciona *“No acepto”*."
         ),
         yes_label="Acepto",
         no_label="No acepto",
+        button_text="Seleccionar opción",
+        section_title="Tratamiento de datos",
     )
 
 
@@ -74,37 +75,38 @@ def ButtonMessage(number):
     return PolicyButtonMessage(number)
 
 
-def YesNoButtonMessage(number, text, yes_label="Sí", no_label="No"):
+def YesNoButtonMessage(number, text, yes_label="Sí", no_label="No", button_text="Responder", section_title="Opciones"):
     """
-    Formato lógico interno. whatsappservice.py lo traduce a WPPConnect send-buttons.
-    Si send-buttons falla, whatsappservice/app hacen fallback a texto normal.
+    Mantiene el nombre viejo, pero construye una LISTA de WPPConnect.
+    Así el usuario no depende de escribir exactamente “sí/no” o “acepto/no acepto”.
+    whatsappservice.py lo traduce a /send-list-message.
     """
     return {
         "messaging_product": "whatsapp",
         "to": number,
         "type": "interactive",
         "interactive": {
-            "type": "button",
-            "body": {
-                "text": text,
-            },
+            "type": "list",
+            "body": {"text": text},
             "action": {
-                "buttons": [
+                "button": button_text,
+                "sections": [
                     {
-                        "type": "reply",
-                        "reply": {
-                            "id": "yes",
-                            "title": yes_label,
-                        },
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "no",
-                            "title": no_label,
-                        },
-                    },
-                ]
+                        "title": section_title,
+                        "rows": [
+                            {
+                                "id": "yes",
+                                "title": yes_label,
+                                "description": "",
+                            },
+                            {
+                                "id": "no",
+                                "title": no_label,
+                                "description": "",
+                            },
+                        ],
+                    }
+                ],
             },
         },
     }

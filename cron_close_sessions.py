@@ -7,6 +7,15 @@ from app import app, send_text, send_yes_no_buttons, get_or_create_state, mark_s
 INACTIVITY_MINUTES = int(os.getenv("INACTIVITY_MINUTES", "10"))
 WARNING_EXTRA_MINUTES = int(os.getenv("WARNING_EXTRA_MINUTES", "3"))
 
+# Estados en los que el bot NO debe insistir ni mandar mensajes automáticos repetidos.
+SKIP_INACTIVITY_STATES = {
+    "esperando_aceptacion",
+    "esperando_calificacion",
+    "encuesta_satisfaccion",
+    "rechazado",
+    "finalizado",
+}
+
 with app.app_context():
     now = datetime.now(timezone.utc)
     active_sessions = Session.query.filter_by(is_active=True).all()
@@ -18,6 +27,19 @@ with app.app_context():
     )
 
     for s in active_sessions:
+        state_name = s.state.state_name.lower() if s.state else None
+
+        print(
+            f"[CRON] Sesión={s.id} Bot={s.user.bot_session} Cliente={s.user.phone_number} "
+            f"Estado={state_name}",
+            flush=True
+        )
+
+        # Evita el bug de mensajes repetidos cuando ya está esperando aceptación/calificación.
+        if state_name in SKIP_INACTIVITY_STATES:
+            print(f"[CRON] Skip sesión={s.id}; estado no requiere cierre por inactividad", flush=True)
+            continue
+
         if not s.last_message_time:
             continue
 
@@ -32,18 +54,24 @@ with app.app_context():
             context_key="inactivity_warning_sent"
         ).first()
 
+        timeout_poll_ctx = SessionContext.query.filter_by(
+            session_id=s.id,
+            context_key="timeout_poll_sent"
+        ).first()
+
         print(
-            f"[CRON] Sesión={s.id} Bot={s.user.bot_session} Cliente={s.user.phone_number} "
-            f"Estado={s.state.state_name if s.state else None} "
-            f"Inactiva={int(delta.total_seconds())}s Warning={bool(warning_ctx)}",
+            f"[CRON] Sesión={s.id} Inactiva={int(delta.total_seconds())}s "
+            f"Warning={bool(warning_ctx)} TimeoutPoll={bool(timeout_poll_ctx)}",
             flush=True
         )
+
+        if timeout_poll_ctx:
+            continue
 
         if delta > timedelta(minutes=INACTIVITY_MINUTES) and not warning_ctx:
             print(f"[WARN] Enviando aviso de inactividad a sesión {s.id}", flush=True)
 
             number = s.user.phone_number
-
             message = (
                 "Hemos notado que llevas un tiempo sin responder. "
                 f"Si no recibimos un mensaje dentro de los próximos {WARNING_EXTRA_MINUTES} minutos, "
@@ -85,10 +113,18 @@ with app.app_context():
                 "Esperando que el usuario decida si quiere calificar por timeout"
             )
             s.current_state_id = encuesta_state.id
+            s.last_message_time = now
+
+            timeout_poll_ctx = SessionContext(
+                session_id=s.id,
+                context_key="timeout_poll_sent",
+                context_value=now.isoformat(),
+                updated_at=now
+            )
+            db.session.add(timeout_poll_ctx)
             db.session.commit()
 
             number = s.user.phone_number
-
             send_yes_no_buttons(
                 s,
                 number,

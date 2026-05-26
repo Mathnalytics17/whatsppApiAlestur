@@ -1,10 +1,9 @@
 import os
 import requests
 
-
-WPPCONNECT_URL = os.getenv("WPPCONNECT_URL", "http://wppconnect:21465")
+WPPCONNECT_URL = os.getenv("WPPCONNECT_URL", "http://wppconnect:21465").rstrip("/")
 WPPCONNECT_SESSION = os.getenv("WPPCONNECT_SESSION", "alestur_ventas")
-WPPCONNECT_TOKEN = os.getenv("WPPCONNECT_TOKEN", "")
+WPPCONNECT_TOKEN = os.getenv("WPPCONNECT_TOKEN", "").strip().strip("'").strip('"')
 
 
 def _headers():
@@ -12,37 +11,29 @@ def _headers():
         "Content-Type": "application/json; charset=utf-8",
         "Accept": "application/json",
     }
-
     if WPPCONNECT_TOKEN:
         headers["Authorization"] = f"Bearer {WPPCONNECT_TOKEN}"
-
     return headers
 
 
 def build_wpp_phone_payload(number):
     """
     WPPConnect necesita:
-    - phone sin sufijo
-    - isLid=True si viene como @lid
-    - isGroup=True si viene como @g.us
+    - phone sin @lid / @c.us
+    - isLid=True cuando el identificador entrante viene como @lid
+    - isGroup=True cuando viene como grupo @g.us
     """
     if not number:
-        return {
-            "phone": number,
-            "isGroup": False,
-            "isNewsletter": False,
-            "isLid": False,
-        }
+        return {"phone": number, "isGroup": False, "isNewsletter": False, "isLid": False}
 
     number = str(number).replace("+", "").strip()
-
     is_lid = number.endswith("@lid")
     is_group = number.endswith("@g.us")
 
     if number.endswith("@lid"):
-        phone = number.replace("@lid", "")
+        phone = number[:-4]
     elif number.endswith("@c.us"):
-        phone = number.replace("@c.us", "")
+        phone = number[:-5]
     else:
         phone = number
 
@@ -52,6 +43,35 @@ def build_wpp_phone_payload(number):
         "isNewsletter": False,
         "isLid": is_lid,
     }
+
+
+def _post_wpp(endpoint, payload, label):
+    url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/{endpoint}"
+    print(f"📤 WPPConnect payload {label}:", payload, flush=True)
+
+    response = requests.post(url, json=payload, headers=_headers(), timeout=30)
+    print(f"📤 WPPConnect {label}:", response.status_code, response.text, flush=True)
+
+    if response.status_code not in (200, 201):
+        return False
+
+    try:
+        body = response.json()
+    except Exception:
+        return True
+
+    # WPPConnect puede responder status success aunque WhatsApp falle internamente.
+    # Si ack=-1 o isSendFailure=true, para nosotros es envío fallido.
+    items = body.get("response")
+    if isinstance(items, dict):
+        items = [items]
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and (item.get("isSendFailure") is True or item.get("ack") == -1):
+                print("❌ WhatsApp marcó el envío como fallido aunque WPPConnect respondió success", flush=True)
+                return False
+
+    return True
 
 
 def SendMessageWhatsapp(data):
@@ -65,24 +85,14 @@ def SendMessageWhatsapp(data):
 
         if message_type == "text":
             text = data.get("text", {}).get("body") or data.get("message") or ""
-
             payload = build_wpp_phone_payload(number)
             payload["message"] = text
-
-            url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
-            print("📤 WPPConnect payload:", payload, flush=True)
-
-            response = requests.post(url, json=payload, headers=_headers(), timeout=30)
-
-            print("📤 WPPConnect send-message:", response.status_code, response.text, flush=True)
-            return response.status_code in [200, 201]
+            return _post_wpp("send-message", payload, "send-message")
 
         if message_type == "interactive":
             body = data.get("interactive", {}).get("body", {}).get("text", "")
-
             buttons = data.get("interactive", {}).get("action", {}).get("buttons", [])
             options = []
-
             for btn in buttons:
                 title = btn.get("reply", {}).get("title")
                 if title:
@@ -94,32 +104,17 @@ def SendMessageWhatsapp(data):
 
             payload = build_wpp_phone_payload(number)
             payload["message"] = text
-
-            url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
-            print("📤 WPPConnect payload:", payload, flush=True)
-
-            response = requests.post(url, json=payload, headers=_headers(), timeout=30)
-
-            print("📤 WPPConnect interactive->text:", response.status_code, response.text, flush=True)
-            return response.status_code in [200, 201]
+            return _post_wpp("send-message", payload, "interactive->text")
 
         if message_type == "document":
             doc = data.get("document", {})
             link = doc.get("link")
             caption = doc.get("caption", "Documento adjunto")
-
             text = f"{caption}:\n{link}"
 
             payload = build_wpp_phone_payload(number)
             payload["message"] = text
-
-            url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
-            print("📤 WPPConnect payload:", payload, flush=True)
-
-            response = requests.post(url, json=payload, headers=_headers(), timeout=30)
-
-            print("📤 WPPConnect document->link:", response.status_code, response.text, flush=True)
-            return response.status_code in [200, 201]
+            return _post_wpp("send-message", payload, "document->link")
 
         print("⚠️ Tipo de mensaje no soportado todavía:", message_type, data, flush=True)
         return False
@@ -127,99 +122,3 @@ def SendMessageWhatsapp(data):
     except Exception as exception:
         print("❌ Error enviando por WPPConnect:", exception, flush=True)
         return False
-
-
-def clean_phone(number):
-    if not number:
-        return number
-
-    return str(number).replace("+", "").strip()
-
-
-def GetTextUser(message):
-    text = ""
-    typeMessage = message["type"]
-
-    if typeMessage == "text":
-        text = message["text"]["body"]
-
-    elif typeMessage == "interactive":
-        interactiveObject = message["interactive"]
-        typeInteractive = interactiveObject["type"]
-
-        if typeInteractive == "button_reply":
-            text = interactiveObject["button_reply"]["title"]
-        elif typeInteractive == "list_reply":
-            text = interactiveObject["list_reply"]["title"]
-        else:
-            print("sin mensaje", flush=True)
-
-    else:
-        print("sin mensaje", flush=True)
-
-    return text
-
-
-def TextMessage(text, number):
-    data = {
-        "messaging_product": "whatsapp",
-        "to": number,
-        "text": {
-            "body": text,
-        },
-        "type": "text",
-    }
-    return data
-
-
-def TextDocumentMessage(number, filename):
-    base_url = "https://alesturslimitadaapi.top/archivos"
-    link = f"{base_url}/{filename}"
-
-    data = {
-        "messaging_product": "whatsapp",
-        "to": number,
-        "type": "document",
-        "document": {
-            "link": link,
-            "caption": "Documento adjunto",
-        },
-    }
-    return data
-
-
-def ButtonMessage(number):
-    data = {
-        "messaging_product": "whatsapp",
-        "to": number,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {
-                "text": (
-                    "Bienvenido a Alestur. Nos complace poder brindarte asistencia en todo lo que necesites. "
-                    "Antes de continuar, te pedimos que leas nuestra Política de Tratamiento de Datos Personales. "
-                    "Si estás de acuerdo con su contenido, selecciona *“Acepto”*; de lo contrario, selecciona *“No acepto”*"
-                )
-            },
-            "action": {
-                "buttons": [
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "001",
-                            "title": "Acepto",
-                        },
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "002",
-                            "title": "No acepto",
-                        },
-                    },
-                ]
-            },
-        },
-    }
-    return data

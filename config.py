@@ -1,12 +1,10 @@
 import os
 
-DB_USER = "alestur_user"
-DB_PASS = "superpassword"
-DB_NAME = "alestur_db"
-DB_HOST = "db"
-DB_PORT = "5432"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://alestur_user:superpassword@db:5432/alestur_db"
+)
 
-SQLALCHEMY_DATABASE_URI = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+SQLALCHEMY_DATABASE_URI = DATABASE_URL
 SQLALCHEMY_TRACK_MODIFICATIONS = False
-
-SECRET_KEY = "superpassword"
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me")

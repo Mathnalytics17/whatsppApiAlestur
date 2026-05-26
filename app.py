@@ -1,4 +1,6 @@
 from flask import Flask, request, jsonify
+import os
+import re
 import util
 import whatsappservice
 from models import db, User, Session, Message, State, SessionContext, PolicyConsent
@@ -7,12 +9,41 @@ import config
 from datetime import datetime, timedelta, timezone
 
 # minutos sin mensaje para empezar a avisar
-INACTIVITY_MINUTES = 10
-WARNING_EXTRA_MINUTES = 3  # minutos extra después del aviso para cerrar + encuesta
+INACTIVITY_MINUTES = int(os.getenv("INACTIVITY_MINUTES", "10"))
+WARNING_EXTRA_MINUTES = int(os.getenv("WARNING_EXTRA_MINUTES", "3"))  # minutos extra después del aviso para cerrar + encuesta
+IGNORE_SAVED_CONTACTS = os.getenv("IGNORE_SAVED_CONTACTS", "false").lower() == "true"
 
 app = Flask(__name__)
 app.config.from_object(config)
 db.init_app(app)
+
+DEFAULT_STATES = [
+    ("inicio", "Inicio de la conversación"),
+    ("esperando_aceptacion", "Esperando aceptación de política de datos"),
+    ("aceptado", "Política aceptada; puede continuar el asesor humano"),
+    ("rechazado", "Política rechazada"),
+    ("esperando_calificacion", "Esperando si el usuario desea calificar"),
+    ("encuesta_satisfaccion", "Encuesta de satisfacción"),
+    ("finalizado", "Sesión finalizada"),
+]
+
+
+def initialize_database():
+    """Crea tablas y estados base también en producción con Gunicorn."""
+    db.create_all()
+    for name, description in DEFAULT_STATES:
+        state = State.query.filter_by(state_name=name).first()
+        if not state:
+            db.session.add(State(state_name=name, description=description))
+    db.session.commit()
+
+
+with app.app_context():
+    try:
+        initialize_database()
+        print("✅ Base de datos inicializada y estados base listos", flush=True)
+    except Exception as e:
+        print("⚠️ No se pudo inicializar la base de datos al arrancar:", e, flush=True)
 
 # ============================================================
 # HELPERS
@@ -26,13 +57,20 @@ def make_aware(dt):
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
+def normalize_user_text(text):
+    text = (text or "").strip().lower()
+    text = re.sub(r"[\s\n\r\t]+", " ", text)
+    text = text.strip(" .,!¡¿?;:\"'`´")
+    return text
+
+
 def save_policy_consent(session, accepted: bool):
-    consent = PolicyConsent(
-        user_id=session.user_id,
-        session_id=session.id,
-        accepted=accepted
-    )
-    db.session.add(consent)
+    consent = PolicyConsent.query.filter_by(session_id=session.id).first()
+    if not consent:
+        consent = PolicyConsent(user_id=session.user_id, session_id=session.id, accepted=accepted)
+        db.session.add(consent)
+    else:
+        consent.accepted = accepted
     db.session.commit()
     return consent
 
@@ -106,7 +144,9 @@ def log_message(session, direction, text, message_type="text"):
 
 def send_text(session, number, text, update_last_message=True):
     data = util.TextMessage(text, number=number)
-    whatsappservice.SendMessageWhatsapp(data)
+    sent_ok = whatsappservice.SendMessageWhatsapp(data)
+    if not sent_ok:
+        print(f"⚠️ No se pudo enviar mensaje a {number}", flush=True)
 
     # Solo actualiza last_message_time si viene del usuario o del humano,
     # NO en los mensajes automáticos (warning, timeout, encuesta)
@@ -125,9 +165,11 @@ def send_text(session, number, text, update_last_message=True):
 
 def send_policy_buttons(session, number):
     data_button = util.ButtonMessage(number=number)
-    whatsappservice.SendMessageWhatsapp(data_button)
+    sent_ok = whatsappservice.SendMessageWhatsapp(data_button)
     body_text = data_button["interactive"]["body"]["text"]
     log_message(session, "out", body_text, message_type="interactive")
+    if not sent_ok:
+        print(f"⚠️ Falló el envío del mensaje de política a {number}", flush=True)
 
 def send_policy_documents(session, number):
     """
@@ -136,14 +178,14 @@ def send_policy_documents(session, number):
       https://luismolinatest.com/archivos/politica_tratamiento_datos.pdf
       https://luismolinatest.com/archivos/autorizacion_tratamiento_datos.pdf
     """
-    filenames = [
-        "politica_datos.pdf",
-        "autorizacion_datos.pdf",
-    ]
+    filenames_env = os.getenv("POLICY_DOCUMENTS", "politica_datos.pdf,autorizacion_datos.pdf")
+    filenames = [f.strip() for f in filenames_env.split(",") if f.strip()]
     for filename in filenames:
         data = util.TextDocumentMessage(number, filename)
-        whatsappservice.SendMessageWhatsapp(data)
+        sent_ok = whatsappservice.SendMessageWhatsapp(data)
         log_message(session, "out", f"Documento enviado: {filename}", message_type="document")
+        if not sent_ok:
+            print(f"⚠️ Falló el envío del documento {filename} a {number}", flush=True)
 
 def mark_session_abandoned(session):
     now = datetime.now(timezone.utc)
@@ -206,7 +248,7 @@ def handle_new_message(text, number):
 
     current_state = db.session.get(State, session.current_state_id)
     state_name = current_state.state_name.lower() if current_state else "inicio"
-    text_lower = text.strip().lower()
+    text_lower = normalize_user_text(text)
 
     print(f"🌀 Estado actual: {state_name}")
 
@@ -232,7 +274,7 @@ def handle_new_message(text, number):
         # ------------------------------
         # Caso A: ACEPTÓ correctamente
         # ------------------------------
-        if t == "acepto":
+        if t in ["acepto", "aceptar", "si acepto", "sí acepto", "si", "sí"]:
             save_policy_consent(session, accepted=True)
 
             session.current_state_id = get_or_create_state("aceptado").id
@@ -248,7 +290,7 @@ def handle_new_message(text, number):
         # ------------------------------
         # Caso B: NO ACEPTÓ
         # ------------------------------
-        if t in ["no acepto", "no"]:
+        if t in ["no acepto", "noacepto", "rechazo", "no"]:
             save_policy_consent(session, accepted=False)
 
             session.current_state_id = get_or_create_state("rechazado").id
@@ -333,6 +375,10 @@ def handle_new_message(text, number):
 @app.route('/welcome', methods=['GET'])
 def Index():
     return 'welcome to the jungle'
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok"}), 200
 
 @app.route('/whatsapp', methods=['GET'])
 def VerifyToken():
@@ -453,7 +499,7 @@ def extract_wppconnect_message(body):
 
     sender = data.get("sender") or body.get("sender") or {}
 
-    if sender.get("isMyContact") is True:
+    if IGNORE_SAVED_CONTACTS and sender.get("isMyContact") is True:
         print("⏭️ Contacto guardado ignorado:", sender.get("formattedName") or data.get("from"), flush=True)
         return None
     # Ignorar grupos por ahora

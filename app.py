@@ -451,6 +451,11 @@ def extract_wppconnect_message(body):
     if data.get("fromMe") is True:
         return None
 
+    sender = data.get("sender") or body.get("sender") or {}
+
+    if sender.get("isMyContact") is True:
+        print("⏭️ Contacto guardado ignorado:", sender.get("formattedName") or data.get("from"), flush=True)
+        return None
     # Ignorar grupos por ahora
     if data.get("isGroupMsg") is True:
         return None

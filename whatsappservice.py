@@ -19,25 +19,50 @@ def _headers():
     return headers
 
 
+def build_wpp_phone_payload(number):
+    """
+    WPPConnect necesita:
+    - phone sin sufijo
+    - isLid=True si viene como @lid
+    - isGroup=True si viene como @g.us
+    """
+    if not number:
+        return {
+            "phone": number,
+            "isGroup": False,
+            "isNewsletter": False,
+            "isLid": False,
+        }
+
+    number = str(number).replace("+", "").strip()
+
+    is_lid = number.endswith("@lid")
+    is_group = number.endswith("@g.us")
+
+    if number.endswith("@lid"):
+        phone = number.replace("@lid", "")
+    elif number.endswith("@c.us"):
+        phone = number.replace("@c.us", "")
+    else:
+        phone = number
+
+    return {
+        "phone": phone,
+        "isGroup": is_group,
+        "isNewsletter": False,
+        "isLid": is_lid,
+    }
+
+
 def SendMessageWhatsapp(data):
-    """
-    Adaptador para mantener compatible tu código viejo.
-
-    Tu app actualmente llama:
-        whatsappservice.SendMessageWhatsapp(data)
-
-    Entonces esta función traduce tus datos actuales al formato de WPPConnect.
-    """
-
     try:
         number = data.get("to") or data.get("phone")
         message_type = data.get("type", "text")
 
         if not number:
-            print("❌ No llegó número destino en data:", data)
+            print("❌ No llegó número destino en data:", data, flush=True)
             return False
 
-        # Mensaje de texto normal
         if message_type == "text":
             text = data.get("text", {}).get("body") or data.get("message") or ""
 
@@ -45,13 +70,13 @@ def SendMessageWhatsapp(data):
             payload["message"] = text
 
             url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
+            print("📤 WPPConnect payload:", payload, flush=True)
+
             response = requests.post(url, json=payload, headers=_headers(), timeout=30)
 
-            print("📤 WPPConnect send-message:", response.status_code, response.text)
+            print("📤 WPPConnect send-message:", response.status_code, response.text, flush=True)
             return response.status_code in [200, 201]
 
-        # Botones: en WhatsApp Web automation esto puede variar.
-        # Para empezar lo convertimos a texto normal, que es más estable.
         if message_type == "interactive":
             body = data.get("interactive", {}).get("body", {}).get("text", "")
 
@@ -71,13 +96,13 @@ def SendMessageWhatsapp(data):
             payload["message"] = text
 
             url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
+            print("📤 WPPConnect payload:", payload, flush=True)
+
             response = requests.post(url, json=payload, headers=_headers(), timeout=30)
 
-            print("📤 WPPConnect interactive->text:", response.status_code, response.text)
+            print("📤 WPPConnect interactive->text:", response.status_code, response.text, flush=True)
             return response.status_code in [200, 201]
 
-        # Documentos: de momento mandamos el link como texto.
-        # Después podemos cambiarlo por send-file o send-link-preview.
         if message_type == "document":
             doc = data.get("document", {})
             link = doc.get("link")
@@ -89,55 +114,112 @@ def SendMessageWhatsapp(data):
             payload["message"] = text
 
             url = f"{WPPCONNECT_URL}/api/{WPPCONNECT_SESSION}/send-message"
+            print("📤 WPPConnect payload:", payload, flush=True)
+
             response = requests.post(url, json=payload, headers=_headers(), timeout=30)
 
-            print("📤 WPPConnect document->link:", response.status_code, response.text)
+            print("📤 WPPConnect document->link:", response.status_code, response.text, flush=True)
             return response.status_code in [200, 201]
 
-        print("⚠️ Tipo de mensaje no soportado todavía:", message_type, data)
+        print("⚠️ Tipo de mensaje no soportado todavía:", message_type, data, flush=True)
         return False
 
     except Exception as exception:
-        print("❌ Error enviando por WPPConnect:", exception)
+        print("❌ Error enviando por WPPConnect:", exception, flush=True)
         return False
 
 
 def clean_phone(number):
-    """
-    WPPConnect puede recibir números normales o JIDs completos.
-    Si viene @lid o @c.us, lo dejamos intacto.
-    """
     if not number:
         return number
 
-    number = str(number).replace("+", "").strip()
-    return number
+    return str(number).replace("+", "").strip()
 
 
-def build_wpp_phone_payload(number):
-    """
-    WPPConnect necesita:
-    - phone sin sufijo
-    - isLid=True si viene como @lid
-    - isGroup=True si viene como @g.us
-    """
-    number = str(number).replace("+", "").strip()
+def GetTextUser(message):
+    text = ""
+    typeMessage = message["type"]
 
-    is_lid = number.endswith("@lid")
-    is_group = number.endswith("@g.us")
+    if typeMessage == "text":
+        text = message["text"]["body"]
 
-    if number.endswith("@lid"):
-        phone = number.replace("@lid", "")
-    elif number.endswith("@c.us"):
-        phone = number.replace("@c.us", "")
-    elif number.endswith("@g.us"):
-        phone = number
+    elif typeMessage == "interactive":
+        interactiveObject = message["interactive"]
+        typeInteractive = interactiveObject["type"]
+
+        if typeInteractive == "button_reply":
+            text = interactiveObject["button_reply"]["title"]
+        elif typeInteractive == "list_reply":
+            text = interactiveObject["list_reply"]["title"]
+        else:
+            print("sin mensaje", flush=True)
+
     else:
-        phone = number
+        print("sin mensaje", flush=True)
 
-    return {
-        "phone": phone,
-        "isGroup": is_group,
-        "isNewsletter": False,
-        "isLid": is_lid,
+    return text
+
+
+def TextMessage(text, number):
+    data = {
+        "messaging_product": "whatsapp",
+        "to": number,
+        "text": {
+            "body": text,
+        },
+        "type": "text",
     }
+    return data
+
+
+def TextDocumentMessage(number, filename):
+    base_url = "https://alesturslimitadaapi.top/archivos"
+    link = f"{base_url}/{filename}"
+
+    data = {
+        "messaging_product": "whatsapp",
+        "to": number,
+        "type": "document",
+        "document": {
+            "link": link,
+            "caption": "Documento adjunto",
+        },
+    }
+    return data
+
+
+def ButtonMessage(number):
+    data = {
+        "messaging_product": "whatsapp",
+        "to": number,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": {
+                "text": (
+                    "Bienvenido a Alestur. Nos complace poder brindarte asistencia en todo lo que necesites. "
+                    "Antes de continuar, te pedimos que leas nuestra Política de Tratamiento de Datos Personales. "
+                    "Si estás de acuerdo con su contenido, selecciona *“Acepto”*; de lo contrario, selecciona *“No acepto”*"
+                )
+            },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "001",
+                            "title": "Acepto",
+                        },
+                    },
+                    {
+                        "type": "reply",
+                        "reply": {
+                            "id": "002",
+                            "title": "No acepto",
+                        },
+                    },
+                ]
+            },
+        },
+    }
+    return data

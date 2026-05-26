@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from models import db, Session, SessionContext, State
-from app import app, send_text, get_or_create_state, mark_session_abandoned
+from app import app, send_text, send_yes_no_list, get_or_create_state, mark_session_abandoned
 
 INACTIVITY_MINUTES = int(os.getenv("INACTIVITY_MINUTES", "10"))
 WARNING_EXTRA_MINUTES = int(os.getenv("WARNING_EXTRA_MINUTES", "3"))
@@ -87,9 +87,9 @@ with app.app_context():
             number = s.user.phone_number
             closing_msg = (
                 "Hemos cerrado esta conversación por inactividad. "
-                "¿Deseas calificar tu experiencia con nosotros? Responde *Sí* o *No*."
+                "¿Deseas calificar tu experiencia con nosotros?"
             )
 
-            send_text(s, number, closing_msg, update_last_message=False)
+            send_yes_no_list(s, number, closing_msg, update_last_message=False)
             db.session.delete(warning_ctx)
             db.session.commit()

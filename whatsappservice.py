@@ -74,6 +74,34 @@ def _post_wpp(endpoint, payload, label):
     return True
 
 
+def _send_text(number, text, label="send-message"):
+    payload = build_wpp_phone_payload(number)
+    payload["message"] = text
+    return _post_wpp("send-message", payload, label)
+
+
+def _send_list(number, list_obj, label="send-list-message"):
+    payload = build_wpp_phone_payload(number)
+    payload.update({
+        "description": list_obj.get("description") or "Selecciona una opción",
+        "buttonText": list_obj.get("buttonText") or "Responder",
+        "sections": list_obj.get("sections") or [],
+    })
+
+    ok = _post_wpp("send-list-message", payload, label)
+    if ok:
+        return True
+
+    # Fallback: si la lista falla, no rompemos el flujo. Enviamos texto numerado.
+    fallback_lines = [payload["description"], "", "Responde con una de estas opciones:"]
+    idx = 1
+    for section in payload.get("sections", []):
+        for row in section.get("rows", []):
+            fallback_lines.append(f"{idx}. {row.get('title', '')}")
+            idx += 1
+    return _send_text(number, "\n".join(fallback_lines), f"{label}->fallback-text")
+
+
 def SendMessageWhatsapp(data):
     try:
         number = data.get("to") or data.get("phone")
@@ -85,36 +113,42 @@ def SendMessageWhatsapp(data):
 
         if message_type == "text":
             text = data.get("text", {}).get("body") or data.get("message") or ""
-            payload = build_wpp_phone_payload(number)
-            payload["message"] = text
-            return _post_wpp("send-message", payload, "send-message")
-
-        if message_type == "interactive":
-            body = data.get("interactive", {}).get("body", {}).get("text", "")
-            buttons = data.get("interactive", {}).get("action", {}).get("buttons", [])
-            options = []
-            for btn in buttons:
-                title = btn.get("reply", {}).get("title")
-                if title:
-                    options.append(f"- {title}")
-
-            text = body
-            if options:
-                text += "\n\nResponde con una de estas opciones:\n" + "\n".join(options)
-
-            payload = build_wpp_phone_payload(number)
-            payload["message"] = text
-            return _post_wpp("send-message", payload, "interactive->text")
+            return _send_text(number, text, "send-message")
 
         if message_type == "document":
             doc = data.get("document", {})
             link = doc.get("link")
             caption = doc.get("caption", "Documento adjunto")
             text = f"{caption}:\n{link}"
+            return _send_text(number, text, "document->link")
 
-            payload = build_wpp_phone_payload(number)
-            payload["message"] = text
-            return _post_wpp("send-message", payload, "document->link")
+        if message_type == "list":
+            return _send_list(number, data.get("list") or {}, "send-list-message")
+
+        if message_type == "interactive":
+            # Compatibilidad con tu estructura vieja de Meta: interactive/buttons -> WPPConnect list.
+            body = data.get("interactive", {}).get("body", {}).get("text", "")
+            buttons = data.get("interactive", {}).get("action", {}).get("buttons", [])
+            rows = []
+            for btn in buttons:
+                reply = btn.get("reply", {})
+                title = reply.get("title")
+                btn_id = reply.get("id") or title
+                if title:
+                    rows.append({
+                        "rowId": str(btn_id),
+                        "title": str(title)[:24],
+                        "description": f"Seleccionar: {title}"[:72],
+                    })
+
+            if rows:
+                return _send_list(number, {
+                    "description": body,
+                    "buttonText": "Seleccionar opción",
+                    "sections": [{"title": "Alestur", "rows": rows}],
+                }, "interactive->list")
+
+            return _send_text(number, body, "interactive->text")
 
         print("⚠️ Tipo de mensaje no soportado todavía:", message_type, data, flush=True)
         return False

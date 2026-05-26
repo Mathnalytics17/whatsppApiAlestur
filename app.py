@@ -164,12 +164,33 @@ def send_text(session, number, text, update_last_message=True):
         db.session.commit()
 
 def send_policy_buttons(session, number):
-    data_button = util.ButtonMessage(number=number)
+    """Envía la política como lista interactiva Acepto / No acepto."""
+    data_button = util.PolicyListMessage(number=number)
     sent_ok = whatsappservice.SendMessageWhatsapp(data_button)
-    body_text = data_button["interactive"]["body"]["text"]
-    log_message(session, "out", body_text, message_type="interactive")
+    body_text = data_button["list"]["description"]
+    log_message(session, "out", body_text, message_type="list")
     if not sent_ok:
         print(f"⚠️ Falló el envío del mensaje de política a {number}", flush=True)
+
+
+def send_yes_no_list(session, number, text, yes_id="si", no_id="no", update_last_message=True):
+    """Envía preguntas Sí/No como lista interactiva."""
+    data = util.YesNoListMessage(number=number, body=text, yes_id=yes_id, no_id=no_id)
+    sent_ok = whatsappservice.SendMessageWhatsapp(data)
+    if not sent_ok:
+        print(f"⚠️ Falló el envío de lista Sí/No a {number}", flush=True)
+
+    if update_last_message:
+        log_message(session, "out", text, message_type="list")
+    else:
+        msg = Message(
+            session_id=session.id,
+            direction="out",
+            message_text=text,
+            message_type="list"
+        )
+        db.session.add(msg)
+        db.session.commit()
 
 def send_policy_documents(session, number):
     """
@@ -265,16 +286,9 @@ def handle_new_message(text, number):
         return
 
     # ================== ACEPTACIÓN ==================
-    # ================== ACEPTACIÓN ==================
     if state_name == "esperando_aceptacion":
 
-        # Normalizamos texto
-        t = text_lower.strip()
-
-        # ------------------------------
-        # Caso A: ACEPTÓ correctamente
-        # ------------------------------
-        if t in ["acepto", "aceptar", "si acepto", "sí acepto", "si", "sí"]:
+        if util.is_accept_response(text_lower):
             save_policy_consent(session, accepted=True)
 
             session.current_state_id = get_or_create_state("aceptado").id
@@ -287,10 +301,7 @@ def handle_new_message(text, number):
             )
             return
 
-        # ------------------------------
-        # Caso B: NO ACEPTÓ
-        # ------------------------------
-        if t in ["no acepto", "noacepto", "rechazo", "no"]:
+        if util.is_reject_response(text_lower):
             save_policy_consent(session, accepted=False)
 
             session.current_state_id = get_or_create_state("rechazado").id
@@ -304,32 +315,32 @@ def handle_new_message(text, number):
             close_session(session, "no_acepta_politica")
             return
 
-        # ------------------------------
-        # Caso C: Cualquier otra cosa
-        # ------------------------------
-        send_text(
-            session,
-            number,
-            "Por favor responde *Acepto* o *No acepto* para continuar."
-        )
+        # Si el usuario escribe cualquier cosa, NO dependemos del texto: reenviamos la lista.
+        send_policy_buttons(session, number)
         return
 
 
     # ================== PREGUNTA ENCUESTA ==================
     if state_name == "esperando_calificacion":
-        if text_lower in ["si", "sí", "s", "yes"]:
+        if util.is_accept_response(text_lower):
             session.current_state_id = get_or_create_state("encuesta_satisfaccion").id
             db.session.commit()
 
-            send_text(session, number, "¿Quedaste satisfecho con la atención? (Sí / No)")
+            send_yes_no_list(
+                session,
+                number,
+                "¿Quedaste satisfecho con la atención?",
+                yes_id="satisfecho",
+                no_id="no_satisfecho"
+            )
             return
 
-        if text_lower in ["no", "n"]:
+        if util.is_reject_response(text_lower):
             send_text(session, number, "Gracias por tu tiempo 😊")
             close_session(session, "no_quiso_calificar")
             return
 
-        send_text(session, number, "Responde *Sí* o *No* por favor.")
+        send_yes_no_list(session, number, "¿Deseas calificar tu experiencia con nosotros?")
         return
 
     # ================== ENCUESTA ==================
@@ -343,7 +354,7 @@ def handle_new_message(text, number):
             ctx = SessionContext(session_id=session.id, context_key="satisfaccion")
             db.session.add(ctx)
 
-        if text_lower in ["si", "sí", "s", "yes"]:
+        if util.is_accept_response(text_lower) or text_lower == "satisfecho":
             ctx.context_value = "satisfecho"
             ctx.updated_at = now
             db.session.commit()
@@ -352,7 +363,7 @@ def handle_new_message(text, number):
             close_session(session, "encuesta_satisfecho")
             return
 
-        if text_lower in ["no", "n"]:
+        if util.is_reject_response(text_lower) or text_lower == "no_satisfecho":
             ctx.context_value = "no_satisfecho"
             ctx.updated_at = now
             db.session.commit()
@@ -361,7 +372,13 @@ def handle_new_message(text, number):
             close_session(session, "encuesta_no_satisfecho")
             return
 
-        send_text(session, number, "Responde *Sí* o *No* por favor.")
+        send_yes_no_list(
+            session,
+            number,
+            "¿Quedaste satisfecho con la atención?",
+            yes_id="satisfecho",
+            no_id="no_satisfecho"
+        )
         return
 
     # ================== ASESOR HUMANO ==================
@@ -514,14 +531,29 @@ def extract_wppconnect_message(body):
         or data.get("author")
     )
 
-    # Texto del mensaje
-    text = (
-        data.get("body")
-        or data.get("text")
-        or data.get("content")
-        or data.get("message")
-        or ""
-    )
+    # Texto del mensaje. Si viene de una lista, priorizamos rowId/id para no depender del texto visible.
+    text = data.get("selectedRowId") or data.get("rowId")
+
+    list_response = data.get("listResponse")
+    if not text and isinstance(list_response, dict):
+        text = (
+            list_response.get("selectedRowId")
+            or list_response.get("rowId")
+            or list_response.get("id")
+            or list_response.get("title")
+        )
+
+    if not text:
+        text = util.GetTextUser(data)
+
+    if not text:
+        text = (
+            data.get("body")
+            or data.get("text")
+            or data.get("content")
+            or data.get("message")
+            or ""
+        )
 
     # Algunos payloads traen el contenido anidado
     if isinstance(text, dict):
@@ -529,6 +561,7 @@ def extract_wppconnect_message(body):
             text.get("body")
             or text.get("conversation")
             or text.get("text")
+            or text.get("id")
             or ""
         )
 
@@ -566,10 +599,10 @@ def close_session_manual(session_id):
     session.current_state_id = get_or_create_state("esperando_calificacion").id
     db.session.commit()
 
-    send_text(
+    send_yes_no_list(
         session,
         number,
-        "La conversación ha finalizado. ¿Deseas calificar tu experiencia? (Sí / No)"
+        "La conversación ha finalizado. ¿Deseas calificar tu experiencia?"
     )
 
     return jsonify({"message": "Sesión marcada para calificación"}), 200

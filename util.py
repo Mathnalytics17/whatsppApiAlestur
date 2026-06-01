@@ -59,7 +59,7 @@ def PolicyButtonMessage(number):
     return YesNoButtonMessage(
         number=number,
         text=(
-            "👋 Hola, soy Belleza 👩‍💼, su asistente virtual de Alestur Ltda."
+            "👋 Hola, soy su asistente virtual de Alestur Ltda."
             "Gracias por contactarnos.Para continuar, necesitamos su autorización para el tratamiento de datos personales, conforme a la Ley 1581 de 2012."
             "📄 Por favor, lea la política enviada y seleccione una opción:"
         ),

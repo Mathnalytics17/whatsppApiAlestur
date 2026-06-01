@@ -4,8 +4,20 @@ import os
 from models import db, Session, SessionContext
 from app import app, send_text, send_yes_no_buttons, get_or_create_state, mark_session_abandoned
 
+INACTIVITY_DAYS = int(os.getenv("INACTIVITY_DAYS", "0"))
 INACTIVITY_MINUTES = int(os.getenv("INACTIVITY_MINUTES", "10"))
+WARNING_EXTRA_DAYS = int(os.getenv("WARNING_EXTRA_DAYS", "0"))
 WARNING_EXTRA_MINUTES = int(os.getenv("WARNING_EXTRA_MINUTES", "3"))
+
+INACTIVITY_DELTA = timedelta(days=INACTIVITY_DAYS) if INACTIVITY_DAYS > 0 else timedelta(minutes=INACTIVITY_MINUTES)
+WARNING_EXTRA_DELTA = timedelta(days=WARNING_EXTRA_DAYS) if WARNING_EXTRA_DAYS > 0 else timedelta(minutes=WARNING_EXTRA_MINUTES)
+
+def human_delta(delta):
+    days = delta.days
+    minutes = int(delta.total_seconds() // 60)
+    if days >= 1:
+        return f"{days} día" + ("s" if days != 1 else "")
+    return f"{minutes} minuto" + ("s" if minutes != 1 else "")
 
 # Estados en los que el bot NO debe insistir ni mandar mensajes automáticos repetidos.
 SKIP_INACTIVITY_STATES = {
@@ -22,7 +34,7 @@ with app.app_context():
 
     print(
         f"[CRON] Ejecutando cierre de sesiones. Activas={len(active_sessions)} "
-        f"INACTIVITY_MINUTES={INACTIVITY_MINUTES} WARNING_EXTRA_MINUTES={WARNING_EXTRA_MINUTES}",
+        f"INACTIVITY={human_delta(INACTIVITY_DELTA)} WARNING_EXTRA={human_delta(WARNING_EXTRA_DELTA)}",
         flush=True
     )
 
@@ -68,13 +80,13 @@ with app.app_context():
         if timeout_poll_ctx:
             continue
 
-        if delta > timedelta(minutes=INACTIVITY_MINUTES) and not warning_ctx:
+        if delta > INACTIVITY_DELTA and not warning_ctx:
             print(f"[WARN] Enviando aviso de inactividad a sesión {s.id}", flush=True)
 
             number = s.user.phone_number
             message = (
                 "Hemos notado que llevas un tiempo sin responder. "
-                f"Si no se recibe un mensaje dentro de los próximos {WARNING_EXTRA_MINUTES} minutos, "
+                f"Si no se recibe un mensaje dentro de los próximos {human_delta(WARNING_EXTRA_DELTA)}, "
                 "cerraremos la conversación automáticamente."
             )
 
@@ -103,7 +115,7 @@ with app.app_context():
             db.session.commit()
             continue
 
-        if delta > timedelta(minutes=INACTIVITY_MINUTES + WARNING_EXTRA_MINUTES):
+        if delta > (INACTIVITY_DELTA + WARNING_EXTRA_DELTA):
             print(f"[TIMEOUT] Cerrando por inactividad sesión {s.id}", flush=True)
 
             mark_session_abandoned(s)

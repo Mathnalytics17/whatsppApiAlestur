@@ -59,9 +59,9 @@ def PolicyButtonMessage(number):
     return YesNoButtonMessage(
         number=number,
         text=(
-            "Bienvenido a Alestur. Nos complace poder brindarte asistencia en todo lo que necesites. "
-            "Antes de continuar, te pedimos que leas nuestra Política de Tratamiento de Datos Personales. "
-            "Si estás de acuerdo con su contenido, selecciona *“Acepto”*; de lo contrario, selecciona *“No acepto”*."
+            "👋 Hola, soy Belleza 👩‍💼, su asistente virtual de Alestur Ltda."
+            "Gracias por contactarnos.Para continuar, necesitamos su autorización para el tratamiento de datos personales, conforme a la Ley 1581 de 2012."
+            "📄 Por favor, lea la política enviada y seleccione una opción:"
         ),
         yes_label="Acepto",
         no_label="No acepto",

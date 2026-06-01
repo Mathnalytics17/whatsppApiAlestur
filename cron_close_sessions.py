@@ -74,7 +74,7 @@ with app.app_context():
             number = s.user.phone_number
             message = (
                 "Hemos notado que llevas un tiempo sin responder. "
-                f"Si no recibimos un mensaje dentro de los próximos {WARNING_EXTRA_MINUTES} minutos, "
+                f"Si no se recibe un mensaje dentro de los próximos {WARNING_EXTRA_MINUTES} minutos, "
                 "cerraremos la conversación automáticamente."
             )
 
@@ -128,7 +128,7 @@ with app.app_context():
             send_yes_no_buttons(
                 s,
                 number,
-                "Hemos cerrado esta conversación por inactividad. ¿Deseas calificar tu experiencia con nosotros?",
+                "Su sesión ha sido cerrada por inactividad, ¿Deseas calificar su experiencia con nosotros?",
                 yes_label="Sí",
                 no_label="No",
                 update_last_message=False

@@ -318,7 +318,7 @@ def handle_new_message(text, number, bot_session=None):
             session.current_state_id = get_or_create_state("aceptado").id
             db.session.commit()
 
-            send_text(session, number, "Perfecto ✅. Un asesor humano se comunicará contigo.")
+            send_text(session, number, "Perfecto ✅. Uno de nuestros Asesores se comunicará con usted ")
             return
 
         if is_reject(text_lower):
@@ -379,7 +379,7 @@ def handle_new_message(text, number, bot_session=None):
             ctx.updated_at = now
             db.session.commit()
 
-            send_text(session, number, "Gracias por calificar 🙌. ¡Hasta pronto!")
+            send_text(session, number, "Gracias, por permitirnos estar conectados con usted a través de este canal ¡hasta luego!")
             close_session(session, "encuesta_satisfecho")
             return
 
@@ -388,7 +388,7 @@ def handle_new_message(text, number, bot_session=None):
             ctx.updated_at = now
             db.session.commit()
 
-            send_text(session, number, "Gracias por tu sinceridad 🙏")
+            send_text(session, number, "Gracias por tu sinceridad 🙏, ¡hasta luego!")
             close_session(session, "encuesta_no_satisfecho")
             return
 

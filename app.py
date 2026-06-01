@@ -643,305 +643,434 @@ def health():
 
 
 # ============================================================
-
-
-
+# API CRM PARA PHP ADMIN
 # ============================================================
-# API PRIVADA PARA CRM / PÁGINA PHP
-# ============================================================
+
+from functools import wraps
+from flask import Response
+import csv
+import io
+
+
+CRM_API_TOKEN = os.getenv("CRM_API_TOKEN", "")
+
+
+def crm_auth_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not CRM_API_TOKEN:
+            return jsonify({
+                "status": "error",
+                "message": "CRM_API_TOKEN no está configurado en el servidor"
+            }), 500
+
+        auth_header = request.headers.get("Authorization", "")
+
+        if not auth_header.startswith("Bearer "):
+            return jsonify({
+                "status": "error",
+                "message": "Token no enviado"
+            }), 401
+
+        token = auth_header.replace("Bearer ", "").strip()
+
+        if token != CRM_API_TOKEN:
+            return jsonify({
+                "status": "error",
+                "message": "Token inválido"
+            }), 403
+
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def format_datetime(value):
+    if not value:
+        return None
+
+    try:
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(value)
+
+
+def get_policy_status_for_user(user_id):
+    """
+    Retorna el último consentimiento registrado del usuario.
+    No usa BOOL_OR porque si una persona primero dijo No y luego Acepto,
+    debe mandar el último estado real.
+    """
+    consent = (
+        PolicyConsent.query
+        .filter(PolicyConsent.user_id == user_id)
+        .order_by(PolicyConsent.created_at.desc(), PolicyConsent.id.desc())
+        .first()
+    )
+
+    if not consent:
+        return {
+            "policy_status": "Pendiente",
+            "policy_accepted": None,
+            "policy_date": None,
+        }
+
+    if consent.accepted is True:
+        status = "Aceptó"
+    else:
+        status = "No aceptó"
+
+    return {
+        "policy_status": status,
+        "policy_accepted": bool(consent.accepted),
+        "policy_date": format_datetime(consent.created_at),
+    }
+
+
+def get_latest_session_for_user(user_id):
+    return (
+        Session.query
+        .filter(Session.user_id == user_id)
+        .order_by(Session.last_message_time.desc().nullslast(), Session.id.desc())
+        .first()
+    )
+
+
+def get_latest_message_for_user(user_id):
+    return (
+        Message.query
+        .join(Session, Session.id == Message.session_id)
+        .filter(Session.user_id == user_id)
+        .order_by(Message.timestamp.desc().nullslast(), Message.id.desc())
+        .first()
+    )
+
+
+def build_contact_payload(user):
+    latest_session = get_latest_session_for_user(user.id)
+    latest_message = get_latest_message_for_user(user.id)
+    policy = get_policy_status_for_user(user.id)
+
+    total_messages = (
+        Message.query
+        .join(Session, Session.id == Message.session_id)
+        .filter(Session.user_id == user.id)
+        .count()
+    )
+
+    current_state = None
+    is_active = False
+    last_message_time = None
+
+    if latest_session:
+        is_active = bool(latest_session.is_active)
+        last_message_time = latest_session.last_message_time
+
+        if latest_session.current_state_id:
+            state = State.query.get(latest_session.current_state_id)
+            if state:
+                current_state = state.state_name
+
+    return {
+        "id": user.id,
+        "user_id": user.id,
+        "phone_number": user.phone_number,
+        "name": user.name,
+        "bot_session": user.bot_session,
+        "created_at": format_datetime(user.created_at),
+
+        "policy_status": policy["policy_status"],
+        "policy_accepted": policy["policy_accepted"],
+        "policy_date": policy["policy_date"],
+
+        "last_message_time": format_datetime(last_message_time),
+        "current_state": current_state,
+        "is_active": is_active,
+        "total_messages": total_messages,
+
+        "latest_message": {
+            "id": latest_message.id if latest_message else None,
+            "direction": latest_message.direction if latest_message else None,
+            "message_text": latest_message.message_text if latest_message else None,
+            "message_type": latest_message.message_type if latest_message else None,
+            "timestamp": format_datetime(latest_message.timestamp) if latest_message else None,
+        } if latest_message else None,
+    }
+
 
 @app.route("/api/crm/health", methods=["GET"])
+@crm_auth_required
 def crm_health():
-    denied = require_crm_token()
-    if denied:
-        return denied
-
     return jsonify({
         "status": "ok",
-        "message": "CRM API funcionando"
+        "message": "CRM API funcionando",
     }), 200
 
 
 @app.route("/api/crm/contacts", methods=["GET"])
+@crm_auth_required
 def crm_contacts():
-    denied = require_crm_token()
-    if denied:
-        return denied
+    """
+    Lista contactos para el panel PHP.
 
-    bot_session = request.args.get("bot_session")
-    accepted = request.args.get("accepted")
-    active = request.args.get("active")
-    q = (request.args.get("q") or "").strip()
+    Filtros opcionales:
+    - ?session=alestur_ventas
+    - ?policy=accepted | rejected | pending
+    - ?q=texto
+    - ?limit=50
+    - ?offset=0
+    """
+
+    session_filter = request.args.get("session", "").strip()
+    policy_filter = request.args.get("policy", "").strip().lower()
+    q = request.args.get("q", "").strip()
 
     try:
-        limit = min(int(request.args.get("limit", 100)), 500)
+        limit = int(request.args.get("limit", 100))
     except Exception:
         limit = 100
 
     try:
-        offset = max(int(request.args.get("offset", 0)), 0)
+        offset = int(request.args.get("offset", 0))
     except Exception:
         offset = 0
 
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+
     query = User.query
 
-    if bot_session:
-        query = query.filter(User.bot_session == bot_session)
+    if session_filter:
+        query = query.filter(User.bot_session == session_filter)
 
     if q:
+        like = f"%{q}%"
         query = query.filter(
-            (User.phone_number.ilike(f"%{q}%")) |
-            (User.name.ilike(f"%{q}%"))
+            db.or_(
+                User.phone_number.ilike(like),
+                User.name.ilike(like),
+                User.bot_session.ilike(like),
+            )
         )
 
     users = (
         query
-        .order_by(User.created_at.desc())
-        .offset(offset)
-        .limit(limit)
+        .order_by(User.created_at.desc(), User.id.desc())
         .all()
     )
 
-    rows = []
+    contacts = [build_contact_payload(user) for user in users]
 
-    for user in users:
-        latest_session = (
-            Session.query
-            .filter_by(user_id=user.id)
-            .order_by(Session.start_time.desc())
-            .first()
-        )
+    if policy_filter:
+        if policy_filter in ["accepted", "acepto", "aceptó"]:
+            contacts = [c for c in contacts if c["policy_accepted"] is True]
+        elif policy_filter in ["rejected", "no_acepto", "no acepto", "no aceptó"]:
+            contacts = [c for c in contacts if c["policy_accepted"] is False]
+        elif policy_filter in ["pending", "pendiente"]:
+            contacts = [c for c in contacts if c["policy_accepted"] is None]
 
-        latest_consent = (
-            PolicyConsent.query
-            .filter_by(user_id=user.id)
-            .order_by(PolicyConsent.created_at.desc())
-            .first()
-        )
+    contacts = sorted(
+        contacts,
+        key=lambda item: item["last_message_time"] or "",
+        reverse=True
+    )
 
-        latest_message = None
-
-        if latest_session:
-            latest_message = (
-                Message.query
-                .filter_by(session_id=latest_session.id)
-                .order_by(Message.timestamp.desc())
-                .first()
-            )
-
-        if accepted is not None:
-            desired = accepted.lower() in [
-                "1", "true", "yes", "si", "sí", "acepto", "accepted"
-            ]
-
-            if not latest_consent or bool(latest_consent.accepted) != desired:
-                continue
-
-        if active is not None:
-            desired_active = active.lower() in [
-                "1", "true", "yes", "si", "sí", "active"
-            ]
-
-            if not latest_session or bool(latest_session.is_active) != desired_active:
-                continue
-
-        rows.append({
-            "id": user.id,
-            "phone_number": user.phone_number,
-            "name": user.name,
-            "bot_session": user.bot_session,
-            "created_at": iso(user.created_at),
-
-            "latest_session": None if not latest_session else {
-                "id": latest_session.id,
-                "is_active": latest_session.is_active,
-                "state": latest_session.state.state_name if latest_session.state else None,
-                "start_time": iso(latest_session.start_time),
-                "end_time": iso(latest_session.end_time),
-                "last_message_time": iso(latest_session.last_message_time),
-            },
-
-            "latest_consent": None if not latest_consent else {
-                "accepted": latest_consent.accepted,
-                "created_at": iso(latest_consent.created_at),
-            },
-
-            "latest_message": None if not latest_message else {
-                "id": latest_message.id,
-                "direction": latest_message.direction,
-                "message_type": latest_message.message_type,
-                "message_text": latest_message.message_text,
-                "timestamp": iso(latest_message.timestamp),
-            },
-        })
+    total = len(contacts)
+    contacts_page = contacts[offset:offset + limit]
 
     return jsonify({
         "status": "ok",
-        "count": len(rows),
-        "results": rows
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "contacts": contacts_page,
+        "data": contacts_page,
     }), 200
+
+
+@app.route("/api/crm/contacts/<int:user_id>", methods=["GET"])
+@crm_auth_required
+def crm_contact_detail(user_id):
+    user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({
+            "status": "error",
+            "message": "Contacto no encontrado"
+        }), 404
+
+    return jsonify({
+        "status": "ok",
+        "contact": build_contact_payload(user),
+    }), 200
+
+
+def get_messages_payload_for_user(user_id):
+    user = User.query.get(user_id)
+
+    if not user:
+        return None
+
+    messages = (
+        Message.query
+        .join(Session, Session.id == Message.session_id)
+        .filter(Session.user_id == user_id)
+        .order_by(Message.timestamp.asc().nullslast(), Message.id.asc())
+        .all()
+    )
+
+    data = []
+
+    for message in messages:
+        data.append({
+            "id": message.id,
+            "session_id": message.session_id,
+            "direction": message.direction,
+            "message_text": message.message_text,
+            "content": message.message_text,  # Alias para compatibilidad con PHP viejo
+            "message_type": message.message_type,
+            "timestamp": format_datetime(message.timestamp),
+        })
+
+    return {
+        "contact": build_contact_payload(user),
+        "messages": data,
+        "data": data,
+        "total": len(data),
+    }
 
 
 @app.route("/api/crm/contacts/<int:user_id>/messages", methods=["GET"])
+@crm_auth_required
 def crm_contact_messages(user_id):
-    denied = require_crm_token()
-    if denied:
-        return denied
+    payload = get_messages_payload_for_user(user_id)
 
-    try:
-        limit = min(int(request.args.get("limit", 100)), 500)
-    except Exception:
-        limit = 100
-
-    user = User.query.get_or_404(user_id)
-
-    sessions = (
-        Session.query
-        .filter_by(user_id=user.id)
-        .order_by(Session.start_time.desc())
-        .all()
-    )
-
-    session_ids = [s.id for s in sessions]
-
-    messages = []
-
-    if session_ids:
-        messages = (
-            Message.query
-            .filter(Message.session_id.in_(session_ids))
-            .order_by(Message.timestamp.asc())
-            .limit(limit)
-            .all()
-        )
+    if payload is None:
+        return jsonify({
+            "status": "error",
+            "message": "Contacto no encontrado"
+        }), 404
 
     return jsonify({
         "status": "ok",
-
-        "user": {
-            "id": user.id,
-            "phone_number": user.phone_number,
-            "name": user.name,
-            "bot_session": user.bot_session,
-        },
-
-        "sessions": [
-            {
-                "id": s.id,
-                "is_active": s.is_active,
-                "state": s.state.state_name if s.state else None,
-                "start_time": iso(s.start_time),
-                "end_time": iso(s.end_time),
-                "last_message_time": iso(s.last_message_time),
-            }
-            for s in sessions
-        ],
-
-        "messages": [
-            {
-                "id": m.id,
-                "session_id": m.session_id,
-                "direction": m.direction,
-                "message_type": m.message_type,
-                "message_text": m.message_text,
-                "timestamp": iso(m.timestamp),
-            }
-            for m in messages
-        ],
+        **payload,
     }), 200
 
 
-@app.route("/api/crm/sessions/active", methods=["GET"])
-def crm_active_sessions():
-    denied = require_crm_token()
-    if denied:
-        return denied
+# Alias para evitar 404 si tu PHP quedó usando otra ruta
+@app.route("/api/crm/contacts/<int:user_id>/conversation", methods=["GET"])
+@crm_auth_required
+def crm_contact_conversation(user_id):
+    return crm_contact_messages(user_id)
 
-    bot_session = request.args.get("bot_session")
 
-    query = (
-        Session.query
-        .join(User)
-        .filter(Session.is_active == True)
+@app.route("/api/crm/conversations/<int:user_id>/messages", methods=["GET"])
+@crm_auth_required
+def crm_conversation_messages(user_id):
+    return crm_contact_messages(user_id)
+
+
+@app.route("/api/crm/contacts/export", methods=["GET"])
+@crm_auth_required
+def crm_contacts_export():
+    users = User.query.order_by(User.created_at.desc(), User.id.desc()).all()
+    contacts = [build_contact_payload(user) for user in users]
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "ID",
+        "Telefono",
+        "Nombre",
+        "Sesion chatbot",
+        "Estado politica",
+        "Acepto politica",
+        "Fecha consentimiento",
+        "Estado actual",
+        "Sesion activa",
+        "Ultimo mensaje",
+        "Total mensajes",
+        "Creado",
+    ])
+
+    for contact in contacts:
+        writer.writerow([
+            contact["id"],
+            contact["phone_number"],
+            contact["name"] or "",
+            contact["bot_session"] or "",
+            contact["policy_status"],
+            "" if contact["policy_accepted"] is None else contact["policy_accepted"],
+            contact["policy_date"] or "",
+            contact["current_state"] or "",
+            contact["is_active"],
+            contact["last_message_time"] or "",
+            contact["total_messages"],
+            contact["created_at"] or "",
+        ])
+
+    csv_content = output.getvalue()
+    output.close()
+
+    return Response(
+        csv_content,
+        mimetype="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": "attachment; filename=contactos_chatbot_alestur.csv"
+        }
     )
 
-    if bot_session:
-        query = query.filter(User.bot_session == bot_session)
 
-    sessions = (
-        query
-        .order_by(Session.last_message_time.desc())
-        .all()
+@app.route("/api/crm/contacts/<int:user_id>/messages/export", methods=["GET"])
+@crm_auth_required
+def crm_contact_messages_export(user_id):
+    payload = get_messages_payload_for_user(user_id)
+
+    if payload is None:
+        return jsonify({
+            "status": "error",
+            "message": "Contacto no encontrado"
+        }), 404
+
+    contact = payload["contact"]
+    messages = payload["messages"]
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow([
+        "Contacto ID",
+        "Telefono",
+        "Sesion chatbot",
+        "Mensaje ID",
+        "Direccion",
+        "Tipo",
+        "Mensaje",
+        "Fecha",
+    ])
+
+    for message in messages:
+        writer.writerow([
+            contact["id"],
+            contact["phone_number"],
+            contact["bot_session"],
+            message["id"],
+            message["direction"],
+            message["message_type"],
+            message["message_text"],
+            message["timestamp"],
+        ])
+
+    csv_content = output.getvalue()
+    output.close()
+
+    filename = f"conversacion_{contact['id']}_{contact['bot_session']}.csv"
+
+    return Response(
+        csv_content,
+        mimetype="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
     )
-
-    return jsonify({
-        "status": "ok",
-        "count": len(sessions),
-        "results": [
-            {
-                "session_id": s.id,
-                "user_id": s.user.id,
-                "phone_number": s.user.phone_number,
-                "name": s.user.name,
-                "bot_session": s.user.bot_session,
-                "state": s.state.state_name if s.state else None,
-                "start_time": iso(s.start_time),
-                "end_time": iso(s.end_time),
-                "last_message_time": iso(s.last_message_time),
-            }
-            for s in sessions
-        ]
-    }), 200
-
-
-@app.route("/api/crm/sessions/<int:session_id>/close", methods=["POST"])
-def crm_close_session(session_id):
-    denied = require_crm_token()
-    if denied:
-        return denied
-
-    session = Session.query.get_or_404(session_id)
-
-    session.is_active = False
-    session.end_time = datetime.now(timezone.utc)
-
-    final_state = get_or_create_state(
-        "finalizado",
-        "Sesión cerrada manualmente desde CRM"
-    )
-
-    session.current_state_id = final_state.id
-
-    db.session.commit()
-
-    return jsonify({
-        "status": "ok",
-        "message": "Sesión cerrada",
-        "session_id": session.id
-    }), 200
-
-
-@app.route("/api/crm/summary", methods=["GET"])
-def crm_summary():
-    denied = require_crm_token()
-    if denied:
-        return denied
-
-    bot_session = request.args.get("bot_session")
-
-    user_query = User.query
-    session_query = Session.query.join(User)
-    consent_query = PolicyConsent.query.join(User)
-
-    if bot_session:
-        user_query = user_query.filter(User.bot_session == bot_session)
-        session_query = session_query.filter(User.bot_session == bot_session)
-        consent_query = consent_query.filter(User.bot_session == bot_session)
-
-    return jsonify({
-        "status": "ok",
-        "total_contacts": user_query.count(),
-        "active_sessions": session_query.filter(Session.is_active == True).count(),
-        "accepted_consents": consent_query.filter(PolicyConsent.accepted == True).count(),
-        "rejected_consents": consent_query.filter(PolicyConsent.accepted == False).count(),
-    }), 200

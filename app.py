@@ -316,17 +316,28 @@ def send_lead_to_php(user, session, first_message=None):
         print("⚠️ PHP_LEADS_API_URL o PHP_LEADS_API_TOKEN no configurado. No se envió lead a PHP.", flush=True)
         return False
 
+    phone_value = user.phone_number or ""
+
     payload = {
-        "phone_number": user.phone_number,
-        "name": user.name or "",
+        # Campos que espera tu PHP
+        "accepted": True,
+        "phone": phone_value.replace("@lid", "").replace("@c.us", "") if phone_value else "",
+        "phone_number": phone_value,
+        "phone_jid": phone_value if "@" in phone_value else "",
+        "jid": phone_value if "@" in phone_value else "",
+        "name": user.name or "Contacto externo / WhatsApp",
         "bot_session": user.bot_session,
-        "source": "whatsapp",
+        "session": user.bot_session,
+        "last_message": first_message or "Aceptó la política de tratamiento de datos personales",
+        "message": first_message or "Aceptó la política de tratamiento de datos personales",
+        "chatbot_user_id": user.id,
+        "chatbot_session_id": session.id,
+        "consent_at": datetime.now(timezone.utc).isoformat(),
+
+        # Compatibilidad adicional
+        "source": "chatbot_whatsapp",
         "channel": "whatsapp",
-        "status": "accepted_policy",
         "policy_accepted": True,
-        "session_id": session.id,
-        "first_message": first_message or "",
-        "notes": "Contacto externo/WhatsApp. Aceptó política de tratamiento de datos personales."
     }
 
     headers = {

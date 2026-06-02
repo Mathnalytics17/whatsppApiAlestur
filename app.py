@@ -4,9 +4,11 @@ import re
 import util
 import whatsappservice
 from models import db, User, Session, Message, State, SessionContext, PolicyConsent
-
+from php_leads_service import create_or_update_php_lead
 import config
 from datetime import datetime, timedelta, timezone
+import requests
+
 
 INACTIVITY_MINUTES = int(os.getenv("INACTIVITY_MINUTES", "10"))
 WARNING_EXTRA_MINUTES = int(os.getenv("WARNING_EXTRA_MINUTES", "3"))
@@ -301,7 +303,53 @@ def is_reject(text):
 # ============================================================
 # LÓGICA DE MENSAJES
 # ============================================================
+def send_lead_to_php(user, session, first_message=None):
+    """
+    Envía el contacto aceptado hacia la página PHP para crear/actualizar un lead.
+    No rompe el flujo del chatbot si la API PHP falla.
+    """
 
+    api_url = os.getenv("PHP_LEADS_API_URL", "").strip()
+    api_token = os.getenv("PHP_LEADS_API_TOKEN", "").strip()
+
+    if not api_url or not api_token:
+        print("⚠️ PHP_LEADS_API_URL o PHP_LEADS_API_TOKEN no configurado. No se envió lead a PHP.", flush=True)
+        return False
+
+    payload = {
+        "phone_number": user.phone_number,
+        "name": user.name or "",
+        "bot_session": user.bot_session,
+        "source": "whatsapp",
+        "channel": "whatsapp",
+        "status": "accepted_policy",
+        "policy_accepted": True,
+        "session_id": session.id,
+        "first_message": first_message or "",
+        "notes": "Contacto externo/WhatsApp. Aceptó política de tratamiento de datos personales."
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_token}",
+    }
+
+    try:
+        response = requests.post(api_url, json=payload, headers=headers, timeout=15)
+
+        print(
+            f"📤 Lead enviado a PHP: {response.status_code} {response.text}",
+            flush=True
+        )
+
+        return 200 <= response.status_code < 300
+
+    except Exception as e:
+        print(f"❌ Error enviando lead a PHP: {e}", flush=True)
+        return False
+    
+    
 def handle_new_message(text, number, bot_session=None):
     now = datetime.now(timezone.utc)
     bot_session = normalize_bot_session(bot_session)
@@ -345,10 +393,22 @@ def handle_new_message(text, number, bot_session=None):
         if is_accept(text_lower):
             save_policy_consent(session, accepted=True)
 
+            # Enviar lead a la página PHP
+            send_lead_to_php(
+                user=user,
+                session=session,
+                first_message=text
+            )
+
             session.current_state_id = get_or_create_state("aceptado").id
             db.session.commit()
 
-            send_text(session, number, "Perfecto ✅. Uno de nuestros Asesores se comunicará con usted ")
+            send_text(
+                session,
+                number,
+                "Perfecto ✅. Uno de nuestros Asesores se comunicará con usted"
+            )
+
             return
 
         if is_reject(text_lower):

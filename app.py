@@ -135,7 +135,10 @@ def close_session(session, reason=None):
     session.is_active = False
     session.end_time = now
     session.current_state_id = get_or_create_state("finalizado").id
-    session.last_message_time = now
+
+    # Regla dura:
+    # NO se actualiza last_message_time al cerrar.
+    # last_message_time representa únicamente el último mensaje real del cliente.
 
     if reason:
         ctx = SessionContext.query.filter_by(
@@ -153,18 +156,23 @@ def close_session(session, reason=None):
     db.session.commit()
 
 
-def log_message(session, direction, text, message_type="text", update_last_message=True):
+def log_message(session, direction, text, message_type="text", update_last_message=None):
     now = datetime.now(timezone.utc)
 
     msg = Message(
         session_id=session.id,
         direction=direction,
         message_text=text or "",
-        message_type=message_type
+        message_type=message_type,
+        timestamp=now
     )
     db.session.add(msg)
 
-    if update_last_message:
+    # Regla dura:
+    # La inactividad se mide SOLO por mensajes entrantes reales del cliente.
+    # Los mensajes salientes del bot, documentos, listas, warnings y encuestas
+    # nunca renuevan last_message_time aunque alguien pase update_last_message=True.
+    if direction == "in":
         session.last_message_time = now
 
     db.session.commit()
@@ -275,6 +283,64 @@ def clear_inactivity_warning(session):
         db.session.commit()
 
 
+def clear_session_context(session, key):
+    ctx = SessionContext.query.filter_by(
+        session_id=session.id,
+        context_key=key
+    ).first()
+
+    if ctx:
+        db.session.delete(ctx)
+        db.session.commit()
+
+
+def clear_survey_context(session):
+    clear_session_context(session, "timeout_poll_sent")
+    clear_session_context(session, "inactivity_warning_sent")
+
+
+def current_session_has_accepted_policy(session):
+    """
+    La autorización de política pertenece al ciclo/conversación actual.
+    No es global ni permanente entre conversaciones cerradas.
+    """
+    if not session:
+        return False
+
+    return (
+        PolicyConsent.query
+        .filter_by(session_id=session.id, accepted=True)
+        .first()
+        is not None
+    )
+
+
+def move_session_to_accepted(session):
+    session.current_state_id = get_or_create_state("aceptado").id
+    db.session.commit()
+
+
+def get_session_context(session, key):
+    return SessionContext.query.filter_by(
+        session_id=session.id,
+        context_key=key
+    ).first()
+
+
+def set_session_context(session, key, value):
+    now = datetime.now(timezone.utc)
+    ctx = get_session_context(session, key)
+
+    if not ctx:
+        ctx = SessionContext(session_id=session.id, context_key=key)
+        db.session.add(ctx)
+
+    ctx.context_value = value
+    ctx.updated_at = now
+    db.session.commit()
+    return ctx
+
+
 def normalize_answer(text):
     text = (text or "").strip().lower()
     text = text.replace("í", "i")
@@ -379,6 +445,7 @@ def handle_new_message(text, number, bot_session=None):
         db.session.add(session)
         db.session.commit()
     else:
+        # Si el cliente vuelve después de una encuesta pendiente, el warning viejo no aplica.
         clear_inactivity_warning(session)
 
     log_message(session, "in", text)
@@ -390,8 +457,18 @@ def handle_new_message(text, number, bot_session=None):
     print(f"🌀 Estado actual: {state_name} | sesión WPP: {bot_session} | cliente: {number}", flush=True)
 
     # ================== ESTADO INICIO ==================
-    # Se activa con el primer mensaje que escriba la persona. No depende de "hola".
+    # La política se pide por ciclo/conversación, no de forma global.
+    # Si por algún bug esta sesión ya tiene aceptación, se repara y pasa a aceptado.
     if state_name == "inicio":
+        if current_session_has_accepted_policy(session):
+            move_session_to_accepted(session)
+            print(
+                f"✅ Sesión actual ya tenía política aceptada. No se vuelve a solicitar. "
+                f"Cliente={number} | sesión={bot_session}",
+                flush=True
+            )
+            return
+
         send_policy_buttons(session, number)
         send_policy_documents(session, number)
 
@@ -404,7 +481,6 @@ def handle_new_message(text, number, bot_session=None):
         if is_accept(text_lower):
             save_policy_consent(session, accepted=True)
 
-            # Enviar lead a la página PHP
             send_lead_to_php(
                 user=user,
                 session=session,
@@ -417,9 +493,8 @@ def handle_new_message(text, number, bot_session=None):
             send_text(
                 session,
                 number,
-                "Perfecto ✅. Uno de nuestros Asesores se comunicará con usted"
+                "Perfecto. Uno de nuestros Asesores se comunicará con usted"
             )
-
             return
 
         if is_reject(text_lower):
@@ -451,16 +526,19 @@ def handle_new_message(text, number, bot_session=None):
             return
 
         if is_no(text_lower):
-            send_text(session, number, "Gracias por tu tiempo 😊")
+            send_text(session, number, "Gracias por tu tiempo.")
             close_session(session, "no_quiso_calificar")
             return
 
-        send_yes_no_buttons(
-            session,
-            number,
-            "¿Deseas calificar tu experiencia con nosotros?",
-            yes_label="Sí",
-            no_label="No"
+        # Regla dura:
+        # Si el cliente escribe algo distinto de sí/no, quiere retomar la conversación.
+        # Se cancela la encuesta, la sesión sigue abierta y NO se vuelve a pedir política.
+        clear_survey_context(session)
+        move_session_to_accepted(session)
+
+        print(
+            f"🔁 Encuesta cancelada por mensaje normal. Cliente={number} | sesión={bot_session}",
+            flush=True
         )
         return
 
@@ -480,7 +558,7 @@ def handle_new_message(text, number, bot_session=None):
             ctx.updated_at = now
             db.session.commit()
 
-            send_text(session, number, "Gracias, por permitirnos estar conectados con usted a través de este canal ¡hasta luego!")
+            send_text(session, number, "Gracias por permitirnos estar conectados con usted a través de este canal. Hasta luego.")
             close_session(session, "encuesta_satisfecho")
             return
 
@@ -489,21 +567,22 @@ def handle_new_message(text, number, bot_session=None):
             ctx.updated_at = now
             db.session.commit()
 
-            send_text(session, number, "Gracias por tu sinceridad 🙏, ¡hasta luego!")
+            send_text(session, number, "Gracias por tu sinceridad. Hasta luego.")
             close_session(session, "encuesta_no_satisfecho")
             return
 
-        send_yes_no_buttons(
-            session,
-            number,
-            "Por favor confirma: ¿quedaste satisfecho con la atención?",
-            yes_label="Sí",
-            no_label="No"
+        # También en la segunda pregunta: si escribe algo normal, retoma conversación.
+        clear_survey_context(session)
+        move_session_to_accepted(session)
+
+        print(
+            f"🔁 Encuesta de satisfacción cancelada por mensaje normal. Cliente={number} | sesión={bot_session}",
+            flush=True
         )
         return
 
     # ================== ASESOR HUMANO ==================
-    # Estado "aceptado": el bot ya no responde; solo registra mensajes.
+    # Estado aceptado: el bot no responde; solo registra mensajes.
     return
 
 

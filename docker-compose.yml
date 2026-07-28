@@ -54,8 +54,8 @@ services:
     ports:
       - "21465:21465"
     volumes:
-      - wppconnect_tokens:/usr/src/wppconnect-server/tokens
-      - wppconnect_user_data:/usr/src/wppconnect-server/userDataDir
+      - wppconnect_tokens:/usr/src/wpp-server/tokens
+      - wppconnect_user_data:/usr/src/wpp-server/userDataDir
 volumes:
   postgres_data:
   wppconnect_tokens:

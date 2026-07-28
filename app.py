@@ -181,7 +181,8 @@ def log_message(session, direction, text, message_type="text", update_last_messa
 
 def send_text(session, number, text, update_last_message=True):
     bot_session = session.user.bot_session if session and session.user else None
-    data = util.TextMessage(text, number=number)
+    delivery_target = get_delivery_target(session, number)
+    data = util.TextMessage(text, number=delivery_target)
     whatsappservice.SendMessageWhatsapp(data, session_name=bot_session)
 
     log_message(
@@ -195,7 +196,8 @@ def send_text(session, number, text, update_last_message=True):
 
 def send_yes_no_buttons(session, number, text, yes_label="Sí", no_label="No", update_last_message=True):
     bot_session = session.user.bot_session if session and session.user else None
-    data = util.YesNoButtonMessage(number=number, text=text, yes_label=yes_label, no_label=no_label)
+    delivery_target = get_delivery_target(session, number)
+    data = util.YesNoButtonMessage(number=delivery_target, text=text, yes_label=yes_label, no_label=no_label)
     sent = whatsappservice.SendMessageWhatsapp(data, session_name=bot_session)
 
     if not sent:
@@ -214,7 +216,8 @@ def send_yes_no_buttons(session, number, text, yes_label="Sí", no_label="No", u
 
 def send_policy_buttons(session, number):
     bot_session = session.user.bot_session if session and session.user else None
-    data_button = util.PolicyButtonMessage(number=number)
+    delivery_target = get_delivery_target(session, number)
+    data_button = util.PolicyButtonMessage(number=delivery_target)
     sent = whatsappservice.SendMessageWhatsapp(data_button, session_name=bot_session)
 
     body_text = data_button["interactive"]["body"]["text"]
@@ -237,9 +240,10 @@ def send_policy_documents(session, number):
     ]
 
     bot_session = session.user.bot_session if session and session.user else None
+    delivery_target = get_delivery_target(session, number)
 
     for filename in filenames:
-        data = util.TextDocumentMessage(number, filename)
+        data = util.TextDocumentMessage(delivery_target, filename)
         whatsappservice.SendMessageWhatsapp(data, session_name=bot_session)
         log_message(
             session,
@@ -341,6 +345,63 @@ def set_session_context(session, key, value):
     return ctx
 
 
+def normalize_delivery_phone(value):
+    """Normaliza un número real para envío por @c.us, sin alterar el JID @lid usado como identidad."""
+    if not value:
+        return None
+
+    raw = str(value).strip()
+    digits = re.sub(r"\D", "", raw)
+
+    # Número colombiano local: 3XXXXXXXXX -> 573XXXXXXXXX
+    if len(digits) == 10 and digits.startswith("3"):
+        digits = "57" + digits
+
+    # Rango razonable E.164 sin el signo +
+    if 10 <= len(digits) <= 15:
+        return digits
+
+    return None
+
+
+def save_delivery_phone(session, delivery_phone):
+    """Guarda el número real de entrega en SessionContext sin requerir migración."""
+    normalized = normalize_delivery_phone(delivery_phone)
+    if not session or not normalized:
+        return None
+
+    set_session_context(session, "delivery_phone", normalized)
+    return normalized
+
+
+def get_delivery_target(session, fallback_number):
+    """
+    Devuelve el mejor destino de envío:
+    1. Número real guardado en SessionContext.
+    2. Número entrante si ya es @c.us o un número normal.
+    3. JID @lid como último recurso.
+    """
+    if session:
+        ctx = get_session_context(session, "delivery_phone")
+        if ctx:
+            normalized = normalize_delivery_phone(ctx.context_value)
+            if normalized:
+                return normalized
+
+    fallback = str(fallback_number or "").strip()
+    if fallback.endswith("@c.us"):
+        normalized = normalize_delivery_phone(fallback[:-5])
+        if normalized:
+            return normalized
+
+    if not fallback.endswith("@lid"):
+        normalized = normalize_delivery_phone(fallback)
+        if normalized:
+            return normalized
+
+    return fallback
+
+
 def normalize_answer(text):
     text = (text or "").strip().lower()
     text = text.replace("í", "i")
@@ -383,14 +444,17 @@ def send_lead_to_php(user, session, first_message=None):
         return False
 
     phone_value = user.phone_number or ""
+    delivery_phone = get_delivery_target(session, phone_value)
+    delivery_phone = normalize_delivery_phone(delivery_phone) or ""
 
     payload = {
         # Campos que espera tu PHP
         "accepted": True,
-        "phone": phone_value.replace("@lid", "").replace("@c.us", "") if phone_value else "",
+        "phone": delivery_phone or (phone_value.replace("@lid", "").replace("@c.us", "") if phone_value else ""),
         "phone_number": phone_value,
         "phone_jid": phone_value if "@" in phone_value else "",
         "jid": phone_value if "@" in phone_value else "",
+        "delivery_phone": delivery_phone,
         "name": user.name or "Contacto externo / WhatsApp",
         "bot_session": user.bot_session,
         "session": user.bot_session,
@@ -427,7 +491,7 @@ def send_lead_to_php(user, session, first_message=None):
         return False
     
     
-def handle_new_message(text, number, bot_session=None):
+def handle_new_message(text, number, bot_session=None, delivery_number=None):
     now = datetime.now(timezone.utc)
     bot_session = normalize_bot_session(bot_session)
 
@@ -447,6 +511,14 @@ def handle_new_message(text, number, bot_session=None):
     else:
         # Si el cliente vuelve después de una encuesta pendiente, el warning viejo no aplica.
         clear_inactivity_warning(session)
+
+    # Conserva el JID @lid como identidad, pero guarda el número real para responder por @c.us.
+    saved_delivery_phone = save_delivery_phone(session, delivery_number)
+    if saved_delivery_phone:
+        print(
+            f"📞 Destino real guardado para entrega: {saved_delivery_phone} | JID={number}",
+            flush=True,
+        )
 
     log_message(session, "in", text)
 
@@ -619,7 +691,12 @@ def RecievedMessage():
         number = message['from']
         text = util.GetTextUser(message)
 
-        handle_new_message(text, number, bot_session=os.getenv("WPPCONNECT_SESSION", "alestur_ventas"))
+        handle_new_message(
+            text,
+            number,
+            bot_session=os.getenv("WPPCONNECT_SESSION", "alestur_ventas"),
+            delivery_number=number,
+        )
 
         print("💬 Mensaje Meta recibido:", text, flush=True)
         return "EVENT_RECEIVED"
@@ -664,14 +741,24 @@ def WppconnectWebhook():
 
         text = extracted["text"]
         number = extracted["number"]
+        delivery_number = extracted.get("delivery_number")
         bot_session = normalize_bot_session(extracted.get("bot_session") or body.get("session"))
 
         if not text or not number:
             return jsonify({"status": "ignored_empty"}), 200
 
-        print(f"💬 WPPConnect mensaje recibido de {number} para {bot_session}: {text}", flush=True)
+        print(
+            f"💬 WPPConnect mensaje recibido de {number} para {bot_session}: {text} "
+            f"| destino_real={delivery_number or 'no_disponible'}",
+            flush=True,
+        )
 
-        handle_new_message(text, number, bot_session=bot_session)
+        handle_new_message(
+            text,
+            number,
+            bot_session=bot_session,
+            delivery_number=delivery_number,
+        )
 
         return jsonify({"status": "ok"}), 200
 
@@ -734,8 +821,29 @@ def extract_wppconnect_message(body):
 
     number = normalize_wpp_number(number)
 
+    # WPPConnect puede recibir el contacto como @lid. El sender suele incluir
+    # formattedName/shortName con el número real. Se usa únicamente como destino
+    # de entrega; la identidad del usuario continúa siendo el JID original.
+    delivery_candidates = [
+        sender.get("formattedName"),
+        sender.get("shortName"),
+        data.get("formattedName"),
+        data.get("shortName"),
+    ]
+
+    delivery_number = None
+    for candidate in delivery_candidates:
+        delivery_number = normalize_delivery_phone(candidate)
+        if delivery_number:
+            break
+
+    # Si el evento ya viene como @c.us o número normal, también sirve para entrega.
+    if not delivery_number and not str(number).endswith("@lid"):
+        delivery_number = normalize_delivery_phone(number)
+
     return {
         "number": number,
+        "delivery_number": delivery_number,
         "text": str(text).strip(),
         "bot_session": body.get("session") or data.get("session"),
     }

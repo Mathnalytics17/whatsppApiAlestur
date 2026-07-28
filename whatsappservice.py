@@ -144,14 +144,12 @@ def SendMessageWhatsapp(data, session_name=None):
             interactive_type = data.get("interactive", {}).get("type")
 
             if interactive_type == "list":
-                sent = _send_interactive_list(data, number, session_name=session_name)
-                if sent:
-                    return True
+                # _send_interactive_list ya realiza un único fallback a texto.
+                return _send_interactive_list(data, number, session_name=session_name)
 
             if interactive_type == "button":
-                sent = _send_buttons_as_list(data, number, session_name=session_name)
-                if sent:
-                    return True
+                # _send_buttons_as_list ya realiza un único fallback a texto.
+                return _send_buttons_as_list(data, number, session_name=session_name)
 
             text = _interactive_to_text(data)
             return _send_text(number, text, session_name=session_name, label="fallback-interactive-text")
@@ -174,6 +172,11 @@ def SendMessageWhatsapp(data, session_name=None):
 def _send_text(number, text, session_name=None, label="send-message"):
     payload = build_wpp_phone_payload(number)
     payload["message"] = text
+
+    print(
+        f"📞 Destino WPPConnect: {payload.get('phone')} | isLid={payload.get('isLid')}",
+        flush=True,
+    )
 
     response = _post_wpp("send-message", payload, session_name=session_name)
     delivered = _wpp_response_was_delivered(response)

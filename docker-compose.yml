@@ -51,6 +51,8 @@ services:
       context: ./wppconnect-server
     container_name: wppconnect
     restart: always
+    environment:
+      WPPCONNECT_WHATSAPP_VERSION: ${WPPCONNECT_WHATSAPP_VERSION:-2.3000.1044015310-alpha}
     ports:
       - "21465:21465"
     volumes:

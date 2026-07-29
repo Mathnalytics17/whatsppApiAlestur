@@ -52,11 +52,16 @@ services:
     container_name: wppconnect
     restart: always
     environment:
+      WPPCONNECT_PACKAGE_VERSION: ${WPPCONNECT_PACKAGE_VERSION:-2.2.4}
       WPPCONNECT_WHATSAPP_VERSION: ${WPPCONNECT_WHATSAPP_VERSION:-2.3000.1044015310-alpha}
     entrypoint:
       - sh
       - -c
       - >
+        if [ -n "$$WPPCONNECT_PACKAGE_VERSION" ]; then
+          echo "[wppconnect] Updating @wppconnect-team/wppconnect to $$WPPCONNECT_PACKAGE_VERSION";
+          yarn add "@wppconnect-team/wppconnect@$$WPPCONNECT_PACKAGE_VERSION";
+        fi;
         node -e "const v=process.env.WPPCONNECT_WHATSAPP_VERSION;
         if (v) {
           const m=require('./dist/config.js');

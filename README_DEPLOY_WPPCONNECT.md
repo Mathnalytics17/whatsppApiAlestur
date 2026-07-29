@@ -50,6 +50,28 @@ docker-compose build web cron wppconnect
 docker-compose up -d db wppconnect web nginx cron
 ```
 
+## Redeploy limpio de WPPConnect
+
+Para aplicar cambios de versiÃ³n de WhatsApp Web y limpiar contenedores/locks viejos de Chromium sin borrar la base de datos:
+
+```bash
+cd /var/www/APIWPALESTUR
+git pull
+sh scripts/redeploy_wppconnect_clean.sh
+```
+
+Si Chromium sigue bloqueado o quieres empezar WPPConnect realmente desde cero, borra tambiÃ©n los volÃºmenes de sesiÃ³n/tokens de WPPConnect. Esto puede pedir QR y regenerar/configurar token:
+
+```bash
+sh scripts/redeploy_wppconnect_clean.sh --wipe-session
+```
+
+La versiÃ³n de WhatsApp Web se controla desde `.env`:
+
+```env
+WPPCONNECT_WHATSAPP_VERSION=2.3000.1044015310-alpha
+```
+
 ## Generar token nuevo WPPConnect
 
 ```bash

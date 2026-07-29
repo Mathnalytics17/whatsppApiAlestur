@@ -120,6 +120,31 @@ curl -X POST "https://alesturslimitadaapi.top/wppconnect" \
 docker logs --tail=150 flask_app
 ```
 
+## SSL del origen y Cloudflare 526
+
+Cloudflare muestra `526` cuando esta en modo Full/Strict y el certificado del servidor origen esta vencido, invalido o no coincide con el dominio. Este proyecto monta `/etc/letsencrypt` dentro del contenedor `flask_nginx`, asi que el certificado se renueva en el host y luego se recarga Nginx.
+
+Revisar vencimiento del certificado del origen:
+
+```bash
+cd /var/www/APIWPALESTUR
+sh scripts/check_origin_ssl_expiry.sh alesturslimitadaapi.top
+```
+
+Renovar y recargar Nginx:
+
+```bash
+sh scripts/renew_origin_ssl.sh alesturslimitadaapi.top
+```
+
+Cron recomendado para revisar a diario y renovar cuando Certbot lo considere necesario:
+
+```cron
+15 3 * * * cd /var/www/APIWPALESTUR && sh scripts/renew_origin_ssl.sh alesturslimitadaapi.top >> /var/log/alestur_ssl_renew.log 2>&1
+```
+
+En Cloudflare, usar SSL/TLS `Full (strict)` solo si el origen tiene certificado vigente. Si el certificado del origen vence, Cloudflare puede devolver `526` aunque el certificado visible del navegador sea el de Cloudflare.
+
 ## Nota importante sobre `@lid`
 
 WhatsApp Web a veces convierte números reales en identificadores `@lid`. Por eso el backend conserva el `from` exacto entrante y al responder envía `isLid: true` cuando el destino termina en `@lid`.

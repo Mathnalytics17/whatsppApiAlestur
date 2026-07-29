@@ -58,6 +58,7 @@ services:
       - sh
       - -c
       - >
+        find ./userDataDir \( -name SingletonLock -o -name SingletonSocket -o -name SingletonCookie -o -name DevToolsActivePort \) -delete 2>/dev/null || true;
         if [ -n "$$WPPCONNECT_PACKAGE_VERSION" ]; then
           echo "[wppconnect] Updating @wppconnect-team/wppconnect to $$WPPCONNECT_PACKAGE_VERSION";
           yarn add "@wppconnect-team/wppconnect@$$WPPCONNECT_PACKAGE_VERSION";

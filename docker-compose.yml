@@ -53,6 +53,19 @@ services:
     restart: always
     environment:
       WPPCONNECT_WHATSAPP_VERSION: ${WPPCONNECT_WHATSAPP_VERSION:-2.3000.1044015310-alpha}
+    entrypoint:
+      - sh
+      - -c
+      - >
+        node -e "const v=process.env.WPPCONNECT_WHATSAPP_VERSION;
+        if (v) {
+          const m=require('./dist/config.js');
+          const c=m.default||m;
+          c.createOptions=c.createOptions||{};
+          c.createOptions.whatsappVersion=v;
+          console.log('[wppconnect] Using WhatsApp Web version: '+v);
+        }
+        require('./dist/server.js');"
     ports:
       - "21465:21465"
     volumes:
